@@ -34,7 +34,7 @@ bash scripts/run_visualize.sh --yolo-dir data/yolo_subset --num 5
 3. Create night-augmented copies (labels preserved):
 
 ```bash
-bash scripts/run_augment.sh --yolo-dir data/yolo_subset --out data/yolo_augmented --method night
+PY=.venv/bin/python bash scripts/04_generate_night_aug.sh
 ```
 
 4. Train baseline YOLO (quick smoke):
@@ -85,6 +85,40 @@ environment does not expose MPS:
 
 ```bash
 PY=.venv-mps/bin/python bash scripts/03_train_baseline.sh --device mps
+```
+
+Classical night augmentation
+----------------------------
+Milestone 3 creates a second YOLO dataset at `data/yolo_aug_night/`:
+
+- `images/train` contains both original real training images and night-augmented copies.
+- `labels/train` contains copied YOLO labels for both versions.
+- `images/val` and `labels/val` remain real-only and unchanged.
+- `dataset.yaml` points YOLO to the augmented training set and real validation set.
+- `previews/` contains contact sheets comparing original vs. night images with boxes.
+
+Generate it with:
+
+```bash
+PY=.venv/bin/python bash scripts/04_generate_night_aug.sh
+```
+
+Then train on the augmented dataset with:
+
+```bash
+PY=.venv/bin/python bash scripts/03_train_baseline.sh \
+  --data data/yolo_aug_night/dataset.yaml \
+  --name yolov8n_night_smoke
+```
+
+Readable metrics
+----------------
+Ultralytics writes dense CSV logs to `results.csv`. Training now also writes a
+human-readable `metrics_summary.md` in the run folder. To summarize an existing
+run manually:
+
+```bash
+PY=.venv/bin/python bash scripts/05_summarize_results.sh runs/baseline/yolov8n_smoke/results.csv
 ```
 
 Ablation plan

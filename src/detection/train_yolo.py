@@ -52,6 +52,14 @@ def main():
 
     model.train(**train_kwargs)
 
+    save_dir = Path(model.trainer.save_dir)
+    results_csv = save_dir / "results.csv"
+    if results_csv.exists():
+        from src.detection.summarize_results import summarize_results
+
+        summary_path = summarize_results(results_csv)
+        print(f"Readable metrics summary: {summary_path}")
+
 
 if __name__ == "__main__":
     main()

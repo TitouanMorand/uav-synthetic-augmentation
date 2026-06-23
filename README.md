@@ -40,14 +40,26 @@ bash scripts/run_augment.sh --yolo-dir data/yolo_subset --out data/yolo_augmente
 4. Train baseline YOLO (quick smoke):
 
 ```bash
-bash scripts/run_train.sh --data-dir data/yolo_subset --epochs 3
+PY=.venv/bin/python bash scripts/03_train_baseline.sh
 ```
 
 5. Validate model:
 
 ```bash
-bash scripts/run_val.sh --weights runs/train/exp/weights/best.pt --data-dir data/yolo_subset
+PY=.venv/bin/python -m src.detection.val_yolo \
+  --weights runs/baseline/yolov8n_smoke/weights/best.pt
 ```
+
+Baseline smoke test
+-------------------
+Milestone 2 adds a lightweight YOLO baseline using Ultralytics, with `yolov8n.pt`,
+`data/yolo/dataset.yaml`, `imgsz=640`, `epochs=5`, and `seed=42` by default.
+Runs are saved under `runs/baseline/`.
+
+This baseline is only a smoke test: it checks that the dataset, labels, training
+loop, and validation loop work end to end. Final experiments should use a larger
+exported subset, more epochs, and a deliberate train/validation protocol before
+comparing real-only data against augmented data.
 
 Ablation plan
 --------------

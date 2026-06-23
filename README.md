@@ -80,6 +80,13 @@ DEVICE=mps PY=.venv/bin/python bash scripts/03_train_baseline_fast.sh
 DEVICE=0 PY=.venv/bin/python bash scripts/03_train_baseline_fast.sh
 ```
 
+On Apple Silicon, use the dedicated Python 3.12 environment if the default
+environment does not expose MPS:
+
+```bash
+PY=.venv-mps/bin/python bash scripts/03_train_baseline.sh --device mps
+```
+
 Ablation plan
 --------------
 - Baseline: train on `real` subset.

@@ -12,6 +12,8 @@ data/previews/
 data/previews_check/
 data/previews_visualize/
 data/yolo/data.yaml
+data/yolo/images/
+data/yolo/labels/
 data/yolo_augmented_smoke/
 
 # System files

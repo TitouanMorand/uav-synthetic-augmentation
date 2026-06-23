@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Training and experiment outputs
+runs/
+wandb/
+*.pt
+
+# Local/generated datasets and previews
+data/previews/
+data/previews_check/
+data/previews_visualize/
+data/yolo/data.yaml
+data/yolo_augmented_smoke/
+
+# System files
+.DS_Store

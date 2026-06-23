@@ -1,0 +1,8 @@
+datasets
+ultralytics
+opencv-python
+numpy
+Pillow
+tqdm
+matplotlib
+pycocotools

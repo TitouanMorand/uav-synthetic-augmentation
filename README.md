@@ -61,6 +61,25 @@ loop, and validation loop work end to end. Final experiments should use a larger
 exported subset, more epochs, and a deliberate train/validation protocol before
 comparing real-only data against augmented data.
 
+Fast debug training
+-------------------
+CPU training can be slow. For quick code/data checks, use the fast debug script:
+
+```bash
+PY=.venv/bin/python bash scripts/03_train_baseline_fast.sh
+```
+
+This defaults to `epochs=1`, `imgsz=320`, `fraction=0.1`, `batch=4`, and writes to
+`runs/baseline/yolov8n_fast_debug/`. Use it only to check that the pipeline still
+runs; its metrics are not meaningful for model comparison.
+
+If your machine exposes Apple MPS or CUDA through PyTorch, override the device:
+
+```bash
+DEVICE=mps PY=.venv/bin/python bash scripts/03_train_baseline_fast.sh
+DEVICE=0 PY=.venv/bin/python bash scripts/03_train_baseline_fast.sh
+```
+
 Ablation plan
 --------------
 - Baseline: train on `real` subset.

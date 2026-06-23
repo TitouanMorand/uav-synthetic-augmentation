@@ -38,7 +38,7 @@ def main():
         "data": str(data_path),
         "imgsz": args.imgsz,
         "seed": args.seed,
-        "project": args.project,
+        "project": str(Path(args.project).resolve()),
         "name": args.name,
         "exist_ok": args.exist_ok,
     }

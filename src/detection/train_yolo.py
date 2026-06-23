@@ -17,6 +17,9 @@ def parse_args():
     parser.add_argument("--batch", type=int, default=-1, help="Batch size, -1 lets Ultralytics choose")
     parser.add_argument("--device", default=None, help="Device passed to Ultralytics, e.g. cpu, 0, mps")
     parser.add_argument("--workers", type=int, default=0, help="Dataloader workers")
+    parser.add_argument("--fraction", type=float, default=1.0, help="Fraction of training data to use")
+    parser.add_argument("--cache", action="store_true", help="Cache images for faster repeated runs")
+    parser.add_argument("--plots", action="store_true", help="Save training plots")
     parser.add_argument("--exist-ok", action="store_true", help="Allow reusing an existing run directory")
     return parser.parse_args()
 
@@ -35,10 +38,13 @@ def main():
         "epochs": args.epochs,
         "imgsz": args.imgsz,
         "seed": args.seed,
-        "project": args.project,
+        "project": str(Path(args.project).resolve()),
         "name": args.name,
         "batch": args.batch,
         "workers": args.workers,
+        "fraction": args.fraction,
+        "cache": args.cache,
+        "plots": args.plots,
         "exist_ok": args.exist_ok,
     }
     if args.device:

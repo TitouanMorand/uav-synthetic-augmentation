@@ -106,10 +106,14 @@ PY=.venv/bin/python bash scripts/04_generate_night_aug.sh
 Then train on the augmented dataset with:
 
 ```bash
-PY=.venv/bin/python bash scripts/03_train_baseline.sh \
-  --data data/yolo_aug_night/dataset.yaml \
-  --name yolov8n_night_smoke
+PY=.venv/bin/python bash scripts/05_train_augmented.sh
 ```
+
+The script trains two runs with the same model, image size, epochs, seed, batch
+setting, workers, and validation images:
+
+- baseline: `data/yolo/dataset.yaml`
+- augmented: `data/yolo_aug_night/dataset.yaml`
 
 Readable metrics
 ----------------
@@ -118,7 +122,7 @@ human-readable `metrics_summary.md` in the run folder. To summarize an existing
 run manually:
 
 ```bash
-PY=.venv/bin/python bash scripts/05_summarize_results.sh runs/baseline/yolov8n_smoke/results.csv
+PY=.venv/bin/python bash scripts/06_summarize_results.sh runs/baseline/yolov8n_smoke/results.csv
 ```
 
 Ablation plan

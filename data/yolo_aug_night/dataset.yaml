@@ -3,4 +3,4 @@ names:
 nc: 1
 path: data/yolo_aug_night
 train: images/train
-val: images/val
+val: ../yolo/images/val

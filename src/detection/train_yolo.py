@@ -1,13 +1,13 @@
 """
-Train a lightweight Ultralytics YOLO baseline on the exported drone dataset.
+Train a lightweight Ultralytics YOLO detector on any YOLO dataset YAML.
 """
 import argparse
 from pathlib import Path
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train a YOLO smoke-test baseline.")
-    parser.add_argument("--data", default="data/yolo/dataset.yaml", help="YOLO dataset YAML")
+    parser = argparse.ArgumentParser(description="Train a YOLO detector from a dataset YAML.")
+    parser.add_argument("--data", default="data/yolo/dataset.yaml", help="YOLO dataset YAML path")
     parser.add_argument("--model", default="yolov8n.pt", help="Ultralytics model checkpoint")
     parser.add_argument("--epochs", type=int, default=5, help="Epochs for the smoke test")
     parser.add_argument("--imgsz", type=int, default=640, help="Training image size")
@@ -50,6 +50,9 @@ def main():
     if args.device:
         train_kwargs["device"] = args.device
 
+    print(f"Training dataset: {data_path}")
+    print(f"Run name: {args.name}")
+    print(f"Model/imgsz/epochs/seed: {args.model}/{args.imgsz}/{args.epochs}/{args.seed}")
     model.train(**train_kwargs)
 
     save_dir = Path(model.trainer.save_dir)

@@ -7,6 +7,7 @@ image geometry is unchanged, YOLO labels can be copied as-is.
 """
 import argparse
 import math
+import os
 import random
 import shutil
 from pathlib import Path
@@ -181,7 +182,8 @@ def make_contact_sheets(
         cv2.imwrite(str(preview_dir / f"night_contact_sheet_{sheet_idx:02d}.jpg"), sheet)
 
 
-def write_dataset_yaml(out_root: Path) -> None:
+def write_dataset_yaml(out_root: Path, val_images_dir: Path) -> None:
+    val_path = os.path.relpath(val_images_dir, out_root)
     yaml_text = "\n".join(
         [
             "names:",
@@ -189,7 +191,7 @@ def write_dataset_yaml(out_root: Path) -> None:
             "nc: 1",
             f"path: {out_root.as_posix()}",
             "train: images/train",
-            "val: images/val",
+            f"val: {Path(val_path).as_posix()}",
             "",
         ]
     )
@@ -241,7 +243,7 @@ def generate_night_dataset(
             shutil.copy2(label_path, aug_label_path)
             preview_pairs.append((image_path, aug_path, label_path))
 
-    write_dataset_yaml(output_root)
+    write_dataset_yaml(output_root, input_root / "images" / "val")
     make_contact_sheets(preview_pairs, output_root / "previews", preview_count, seed)
 
     print(f"Wrote night dataset to {output_root}")

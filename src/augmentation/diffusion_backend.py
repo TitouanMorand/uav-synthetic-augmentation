@@ -52,7 +52,7 @@ class DiffusionBackend:
     def _select_dtype(device: str):
         import torch
 
-        if device in {"cuda", "mps"}:
+        if device == "cuda":
             return torch.float16
         return torch.float32
 

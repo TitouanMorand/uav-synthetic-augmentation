@@ -23,7 +23,14 @@ def read_manifest(path: Path) -> list[dict]:
     return rows
 
 
+def load_rgb(path: Path) -> Image.Image:
+    if not path.exists():
+        raise FileNotFoundError(f"Preview image not found: {path}")
+    return Image.open(path).convert("RGB")
+
+
 def draw_yolo_boxes(image: Image.Image, label_path: Path) -> Image.Image:
+    image = image.copy()
     arr = np.array(image.convert("RGB"))[:, :, ::-1].copy()
     h, w = arr.shape[:2]
     if label_path.exists():
@@ -62,8 +69,8 @@ def make_contact_sheet(rows: list[dict], out_path: Path, tile_width: int, mask_m
         out_image_path = Path(row["output_image_path"])
         out_label_path = Path(row["output_label_path"])
 
-        original = Image.open(src_image_path).convert("RGB")
-        generated = Image.open(out_image_path).convert("RGB")
+        original = load_rgb(src_image_path)
+        generated = load_rgb(out_image_path)
         mask = background_inpaint_mask_from_labels(src_label_path, original.size, mask_margin, relative_margin)
         mask_overlay = overlay_mask_on_image(original, mask)
         generated_boxes = draw_yolo_boxes(generated, out_label_path)

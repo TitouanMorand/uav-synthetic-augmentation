@@ -12,6 +12,7 @@ wandb/
 data/previews/
 data/previews_check/
 data/previews_visualize/
+data/synthetic/
 data/yolo/data.yaml
 data/yolo/images/
 data/yolo/labels/
@@ -21,6 +22,7 @@ data/yolo_aug_night/labels/
 data/yolo_aug_night/previews/
 data/yolo_aug_night_balanced/images/
 data/yolo_aug_night_balanced/labels/
+reports/
 
 # System files
 .DS_Store

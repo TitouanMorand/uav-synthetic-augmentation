@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 from PIL import Image
+import numpy as np
 
 from src.augmentation.diffusion_backend import DiffusionBackend, DiffusionBackendConfig
 from src.augmentation.masks_from_boxes import (
@@ -59,6 +60,26 @@ def write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
+def image_pixel_stats(image: Image.Image) -> dict:
+    arr = np.array(image.convert("RGB"))
+    return {
+        "dtype": str(arr.dtype),
+        "min": float(arr.min()),
+        "max": float(arr.max()),
+        "mean": float(arr.mean()),
+        "std": float(arr.std()),
+        "nearly_black_pct": float(np.all(arr < 5, axis=2).mean() * 100.0),
+    }
+
+
+def is_suspicious_black_image(stats: dict) -> bool:
+    return stats["mean"] < 5 or stats["max"] < 30 or stats["std"] < 2
+
+
+def dtype_name(dtype) -> str:
+    return str(dtype).replace("torch.", "")
+
+
 def generate_one(
     backend: DiffusionBackend,
     image_path: Path,
@@ -91,8 +112,16 @@ def generate_one(
     object_mask = object_mask_from_labels(label_path, size, pixel_margin, relative_margin)
     reinsertion_used = False
     model_id = backend.config.img2img_model_id
+    pipeline_used = "StableDiffusionImg2ImgPipeline"
+
+    print(f"  source image: {image_path}")
+    print(f"  source mode/size: {image.mode}/{image.size}")
+    print(f"  device/dtype: {backend.device}/{dtype_name(backend.dtype)}")
+    print(f"  prompt: {positive_prompt}")
+    print(f"  strength/guidance: {strength}/{guidance}")
 
     if mode == "global_img2img":
+        print(f"  pipeline: {pipeline_used}")
         generated = backend.generate_img2img(
             image=image,
             prompt=positive_prompt,
@@ -103,6 +132,8 @@ def generate_one(
         )
     elif mode in {"background_inpaint_protected_box", "background_inpaint_reinsert_object"}:
         model_id = backend.config.inpaint_model_id
+        pipeline_used = "StableDiffusionInpaintPipeline"
+        print(f"  pipeline: {pipeline_used}")
         inpaint_mask = background_inpaint_mask_from_labels(label_path, size, pixel_margin, relative_margin)
         generated = backend.generate_inpaint(
             image=image,
@@ -122,6 +153,19 @@ def generate_one(
     if generated.size != size:
         raise RuntimeError(f"Generated size {generated.size} does not match source size {size}")
 
+    generated = generated.convert("RGB")
+    output_stats = image_pixel_stats(generated)
+    suspicious = is_suspicious_black_image(output_stats)
+    print(f"  output mode/size: {generated.mode}/{generated.size}")
+    print(
+        "  output pixels before saving: "
+        f"min={output_stats['min']:.1f} max={output_stats['max']:.1f} "
+        f"mean={output_stats['mean']:.2f} std={output_stats['std']:.2f} "
+        f"nearly_black={output_stats['nearly_black_pct']:.2f}%"
+    )
+    if suspicious:
+        print(f"WARNING: suspicious near-black generated image: {output_image_path}")
+
     generated.save(output_image_path, quality=95)
     copy_label(label_path, output_label_path)
 
@@ -135,16 +179,88 @@ def generate_one(
         "negative_prompt": negative_prompt,
         "generation_mode": mode,
         "model_id": model_id,
+        "pipeline_used": pipeline_used,
+        "device": backend.device,
+        "dtype": dtype_name(backend.dtype),
         "strength": strength,
         "guidance_scale": guidance,
         "seed": seed,
         "original_image_size": {"width": size[0], "height": size[1]},
+        "output_image_mode": generated.mode,
+        "output_image_size": {"width": generated.size[0], "height": generated.size[1]},
+        "output_pixel_stats": output_stats,
+        "is_suspicious_black_image": suspicious,
         "reinsertion_used": reinsertion_used,
         "box_coordinates_xyxy": [box.__dict__ for box in boxes],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     write_json(output_meta_path, metadata)
     return metadata
+
+
+def save_debug_comparison(original: Image.Image, generated: Image.Image, out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    original_rgb = original.convert("RGB")
+    generated_rgb = generated.convert("RGB")
+    original_rgb.save(out_dir / "original.jpg", quality=95)
+    generated_rgb.save(out_dir / "generated.jpg", quality=95)
+
+    width = original_rgb.width + generated_rgb.width
+    height = max(original_rgb.height, generated_rgb.height)
+    comparison = Image.new("RGB", (width, height), (24, 24, 24))
+    comparison.paste(original_rgb, (0, 0))
+    comparison.paste(generated_rgb, (original_rgb.width, 0))
+    comparison.save(out_dir / "side_by_side.jpg", quality=95)
+    print(f"Debug images written to {out_dir}")
+
+
+def run_debug_single(args, cfg: dict) -> None:
+    paths_cfg = cfg.get("paths", {})
+    models_cfg = cfg.get("models", {})
+    yolo_dir = Path(args.yolo_dir or paths_cfg.get("source_yolo_dir", "data/yolo"))
+    image_dir = yolo_dir / "images" / "train"
+    images = list_train_images(image_dir)
+    if not images:
+        raise RuntimeError(f"No train images found in {image_dir}")
+
+    backend = DiffusionBackend(
+        DiffusionBackendConfig(
+            img2img_model_id=models_cfg.get("img2img", "runwayml/stable-diffusion-v1-5"),
+            inpaint_model_id=models_cfg.get("inpaint", "runwayml/stable-diffusion-inpainting"),
+            device_preference=args.device or cfg.get("device", {}).get("preference", "auto"),
+        )
+    )
+    image_path = images[0]
+    image = Image.open(image_path).convert("RGB")
+    prompt = build_positive_prompt("night_lowlight", args.extra_prompt)
+    print("Running debug-single generation")
+    print(f"  source image: {image_path}")
+    print(f"  source mode/size: {image.mode}/{image.size}")
+    print(f"  pipeline: StableDiffusionImg2ImgPipeline")
+    print(f"  device/dtype: {backend.device}/{dtype_name(backend.dtype)}")
+    print(f"  prompt: {prompt}")
+    print("  strength/guidance: 0.35/7.5")
+    generated = backend.generate_img2img(
+        image=image,
+        prompt=prompt,
+        negative_prompt=NEGATIVE_PROMPT,
+        strength=0.35,
+        guidance_scale=7.5,
+        seed=42,
+    ).convert("RGB")
+    if generated.size != image.size:
+        raise RuntimeError(f"Generated size {generated.size} does not match source size {image.size}")
+    stats = image_pixel_stats(generated)
+    print(f"  output mode/size: {generated.mode}/{generated.size}")
+    print(
+        "  output pixels before saving: "
+        f"min={stats['min']:.1f} max={stats['max']:.1f} "
+        f"mean={stats['mean']:.2f} std={stats['std']:.2f} "
+        f"nearly_black={stats['nearly_black_pct']:.2f}%"
+    )
+    if is_suspicious_black_image(stats):
+        print("WARNING: debug-single generated image is suspiciously near-black.")
+    save_debug_comparison(image, generated, Path("data/previews/debug_single"))
 
 
 def parse_args():
@@ -163,12 +279,16 @@ def parse_args():
     parser.add_argument("--pixel-margin", type=int, default=None)
     parser.add_argument("--relative-margin", type=float, default=None)
     parser.add_argument("--manifest-name", default="manifest.jsonl")
+    parser.add_argument("--debug-single", action="store_true", help="Generate one fixed img2img debug sample")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     cfg = load_config(Path(args.config))
+    if args.debug_single:
+        run_debug_single(args, cfg)
+        return
     paths_cfg = cfg.get("paths", {})
     gen_cfg = cfg.get("generation", {})
     models_cfg = cfg.get("models", {})

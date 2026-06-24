@@ -25,11 +25,18 @@ def reinsert_with_mask(
     boxes: list[BoxPixels],
     object_mask: Image.Image | None = None,
 ) -> Image.Image:
-    """Paste object crops with an optional binary mask over each crop."""
+    """Paste original pixels back into generated image.
+
+    With a protection mask, paste the full original image through that mask so
+    the expanded safety region around tiny drones is restored exactly. Without
+    a mask, fall back to rectangular box crops.
+    """
     out = generated.copy()
-    full_mask = object_mask.convert("L") if object_mask is not None else None
+    if object_mask is not None:
+        out.paste(original.convert("RGB"), (0, 0), object_mask.convert("L"))
+        return out
+
     for box in boxes:
         crop = extract_object_crop(original, box)
-        mask_crop = full_mask.crop((box.x1, box.y1, box.x2, box.y2)) if full_mask is not None else None
-        out.paste(crop, (box.x1, box.y1), mask_crop)
+        out.paste(crop, (box.x1, box.y1))
     return out

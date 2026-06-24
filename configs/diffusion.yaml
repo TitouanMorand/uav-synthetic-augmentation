@@ -40,8 +40,9 @@ prompts:
   negative_prompt: "extra drone, duplicated drone, missing drone, deformed drone, changed object position, text, watermark, logo, strong blur on the main drone object, distorted bounding box, cartoon, painting"
 
 masks:
-  pixel_margin: 16
-  relative_margin: 0.15
+  box_margin_px: 32
+  box_margin_ratio: 2.0
+  protect_all_boxes: true
 
 filtering:
   min_box_iou_placeholder: 0.85

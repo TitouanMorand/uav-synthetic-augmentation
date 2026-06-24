@@ -178,9 +178,16 @@ configs/diffusion.yaml
 
 Generation modes:
 
-- `global_img2img`: whole-image img2img; fastest to try, least protective.
-- `background_inpaint_protected_box`: inpaint background while preserving the drone box.
-- `background_inpaint_reinsert_object`: inpaint, then paste the original drone pixels back.
+- `global_img2img`: naive whole-image img2img baseline. It is useful for
+  qualitative comparison, but it is unsafe for YOLO training unless it passes
+  preservation filters because diffusion can alter small critical objects,
+  including the drone, controller, or FPV screen.
+- `background_inpaint_protected_box`: inpaint background while preserving an
+  expanded drone protection region. Diffusers inpainting uses white pixels for
+  repainting and black pixels for preservation, so the drone region is black in
+  the inpaint mask.
+- `background_inpaint_reinsert_object`: inpaint the editable background first,
+  then paste the original protected drone pixels back before labels are copied.
 
 Small diffusion smoke test:
 
@@ -206,6 +213,24 @@ PY=.venv-mps/bin/python bash scripts/07_preview_diffusion_grid.sh
 The preview contact sheet is saved under `data/previews/diffusion/` and shows:
 original, mask overlay, generated image, and generated image with YOLO boxes.
 
+Object-preserving debug smoke test:
+
+```bash
+PY=.venv/bin/python DEVICE=mps bash scripts/12_debug_object_preserving_generation.sh
+```
+
+This writes generation outputs to `data/synthetic/debug_object_preserving/` and
+a stricter contact sheet to `data/previews/debug_object_preserving/`. The sheet
+shows original, original with box, protection mask, inpaint mask, generated
+before reinsertion, generated after reinsertion, and generated after reinsertion
+with the YOLO box.
+
+Diffusion samples are accepted for training only if automatic preservation
+checks pass. The metadata records crop SSIM, object mean absolute difference,
+background mean absolute difference outside the protected region, black-image
+checks, and rejection reasons. Rejected samples remain useful for debugging but
+should not be added to YOLO training data.
+
 Ablation plan
 --------------
 - Baseline: train on `real` subset.
@@ -215,7 +240,6 @@ Ablation plan
 
 TODO (future work)
 ------------------
-- Add automatic filtering for diffusion samples before training.
 - Evaluate diffusion samples across multiple seeds and train/validation splits.
 - Add object-aware quality checks for duplicated/missing/deformed drones.
 

@@ -6,7 +6,7 @@ Controlled data augmentation pipeline for UAV/drone object detection. Use the Hu
 
 Design constraints
 ------------------
-- Do not train diffusion from scratch. Diffusion-based ideas are left as TODOs.
+- Do not train diffusion from scratch. Diffusion generation uses pretrained models.
 - Use Hugging Face `datasets` to load data.
 - Use Ultralytics `YOLO` package for detector training.
 - Start with small subsets by default (500 train, 100 val) for fast iteration.
@@ -115,6 +115,40 @@ setting, workers, and validation images:
 - baseline: `data/yolo/dataset.yaml`
 - augmented: `data/yolo_aug_night/dataset.yaml`
 
+Balanced augmentation ablation
+------------------------------
+The full augmented dataset has twice as many training images as the baseline:
+500 real images + 500 night copies. That is useful, but it does not isolate the
+effect of the augmentation itself because the model also sees more examples.
+
+For a fairer ablation with the same number of training samples as the baseline,
+create a balanced dataset with 250 real images and their 250 night copies:
+
+```bash
+PY=.venv-mps/bin/python bash scripts/05_prepare_balanced_aug.sh
+```
+
+This writes `data/yolo_aug_night_balanced/dataset.yaml`. Its train split has 500
+images total, and its validation split still points to the real-only validation
+images from `data/yolo/`.
+
+Train the balanced augmented run with the same setup as the 20-epoch baseline:
+
+```bash
+PY=.venv-mps/bin/python DEVICE=mps bash scripts/05_train_augmented_balanced.sh
+```
+
+Observed 20-epoch result on the current 500/100 split:
+
+- baseline best mAP50/mAP50-95: `0.7555 / 0.2981`
+- balanced real+night best mAP50/mAP50-95: `0.6961 / 0.2721`
+
+Interpretation: with the same number of training samples, classical night
+augmentation does not improve the detector on the real-only validation set and
+slightly reduces mAP. The stronger result from the full real+night run is likely
+explained mainly by the larger number of training examples, not by the night
+augmentation alone.
+
 Readable metrics
 ----------------
 Ultralytics writes dense CSV logs to `results.csv`. Training now also writes a
@@ -125,17 +159,65 @@ run manually:
 PY=.venv/bin/python bash scripts/06_summarize_results.sh runs/baseline/yolov8n_smoke/results.csv
 ```
 
+Diffusion augmentation branch
+-----------------------------
+The diffusion branch is an experimental synthetic augmentation path for
+night/low-light variants. It uses pretrained Diffusers pipelines only; it does
+not train a diffusion model and does not alter YOLO labels.
+
+The core preservation rule is: generated images must keep the same pixel
+dimensions as the source image, and copied YOLO labels remain unchanged. For
+object-sensitive generation, masks are built from YOLO boxes so the drone region
+can be protected or reinserted after background editing.
+
+Configuration lives in:
+
+```bash
+configs/diffusion.yaml
+```
+
+Generation modes:
+
+- `global_img2img`: whole-image img2img; fastest to try, least protective.
+- `background_inpaint_protected_box`: inpaint background while preserving the drone box.
+- `background_inpaint_reinsert_object`: inpaint, then paste the original drone pixels back.
+
+Small diffusion smoke test:
+
+```bash
+PY=.venv-mps/bin/python DEVICE=mps bash scripts/06_generate_diffusion_grid.sh
+```
+
+This defaults to 10 source images, `night_lowlight`, all three modes,
+strengths `0.2,0.35`, guidance values `5.0,7.5`, and seed `42`. Outputs are
+written under `data/synthetic/diffusion_grid/` with a JSON metadata file per
+sample and a global manifest:
+
+```bash
+data/synthetic/diffusion_grid/manifest.jsonl
+```
+
+Preview generated samples:
+
+```bash
+PY=.venv-mps/bin/python bash scripts/07_preview_diffusion_grid.sh
+```
+
+The preview contact sheet is saved under `data/previews/diffusion/` and shows:
+original, mask overlay, generated image, and generated image with YOLO boxes.
+
 Ablation plan
 --------------
 - Baseline: train on `real` subset.
 - Augmented: train on `real + night_augmented` (classical augmentation first).
-- Later: add diffusion-based night/weather augmentation (img2img/inpainting) and evaluate.
+- Diffusion: compare real-only vs. real + accepted diffusion samples, keeping
+  validation real-only and unchanged.
 
 TODO (future work)
 ------------------
-- Diffusion img2img/night — use pretrained diffusion models (no training from scratch).
-- Object-protected masks during augmentation (keep drone pixels intact when applying global weather changes).
-- Object extraction and reinsertion (copy-paste augmentation / compositing with realistic lighting).
+- Add automatic filtering for diffusion samples before training.
+- Evaluate diffusion samples across multiple seeds and train/validation splits.
+- Add object-aware quality checks for duplicated/missing/deformed drones.
 
 Notes for interview
 -------------------

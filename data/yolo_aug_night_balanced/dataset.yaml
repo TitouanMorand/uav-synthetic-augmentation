@@ -1,0 +1,6 @@
+names:
+- drone
+nc: 1
+path: data/yolo_aug_night_balanced
+train: images/train
+val: ../yolo/images/val

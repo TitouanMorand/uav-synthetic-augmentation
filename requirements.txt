@@ -6,3 +6,9 @@ Pillow
 tqdm
 matplotlib
 pycocotools
+diffusers
+transformers
+accelerate
+safetensors
+scikit-image
+pyyaml

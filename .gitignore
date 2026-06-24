@@ -19,6 +19,8 @@ data/yolo_augmented_smoke/
 data/yolo_aug_night/images/
 data/yolo_aug_night/labels/
 data/yolo_aug_night/previews/
+data/yolo_aug_night_balanced/images/
+data/yolo_aug_night_balanced/labels/
 
 # System files
 .DS_Store

@@ -34,6 +34,9 @@ experiments:
   object_preserving:
     name: real_plus_object_preserving_v1_hf_drone_300
     dataset_root: data/augmented/yolo_drone_object_preserving_v1_300
+  diffusion:
+    name: real_plus_diffusion_reinsert_night_hf_drone_300
+    dataset_root: data/augmented/yolo_drone_diffusion_reinsert_night_300
 paths:
   previews: artifacts/previews
   reports: artifacts/reports

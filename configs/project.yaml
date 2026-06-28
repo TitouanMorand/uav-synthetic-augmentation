@@ -28,6 +28,19 @@ augmentation:
   synthetic_per_image: 2
   object_padding_px: 8
 
+experiments:
+  baseline:
+    name: baseline_real_only_hf_drone_300
+    dataset_root: data/interim/yolo_drone_hf_300
+
+  classic:
+    name: real_plus_classic_hf_drone_300
+    dataset_root: data/augmented/yolo_drone_classic_300
+
+  object_preserving:
+    name: real_plus_object_preserving_v1_hf_drone_300
+    dataset_root: data/augmented/yolo_drone_object_preserving_v1_300
+
 paths:
   previews: artifacts/previews
   reports: artifacts/reports

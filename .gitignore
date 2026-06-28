@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Local data
+data/raw/*
+data/interim/*
+data/augmented/*
+
+!data/raw/.gitkeep
+!data/interim/.gitkeep
+!data/augmented/.gitkeep
+
+# YOLO / training runs
+runs/*
+!runs/.gitkeep
+
+# Generated artifacts
+artifacts/previews/*
+artifacts/reports/*
+artifacts/tables/*
+
+!artifacts/previews/.gitkeep
+!artifacts/reports/.gitkeep
+!artifacts/tables/.gitkeep
+
+# Model files
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+
+# Logs and system files
+*.log
+.DS_Store

@@ -1,0 +1,14 @@
+numpy>=1.24
+opencv-python>=4.8
+torch>=2.2
+torchvision>=0.17
+ultralytics>=8.2
+albumentations>=1.4
+matplotlib>=3.8
+pandas>=2.0
+pyyaml>=6.0
+tqdm>=4.66
+pillow>=10.0
+datasets>=2.19
+huggingface_hub>=0.23
+rich>=13.7

@@ -1,0 +1,35 @@
+project:
+  name: uav-synthetic-augmentation
+  title: Object-Preserving Synthetic Data Augmentation for Tiny Drone Detection
+
+dataset:
+  hf_name: pathikg/drone-detection-dataset
+  class_name: drone
+  class_id: 0
+  output_root: data/interim/yolo_drone_hf_300
+  split:
+    train: 300
+    val: 80
+    test: 80
+
+yolo:
+  model: yolov8n.pt
+  image_size: 640
+  batch: 4
+  workers: 2
+  epochs_baseline: 15
+  epochs_augmented: 15
+  patience: 5
+  device: auto
+  seed: 42
+
+augmentation:
+  classic_per_image: 2
+  synthetic_per_image: 2
+  object_padding_px: 8
+
+paths:
+  previews: artifacts/previews
+  reports: artifacts/reports
+  tables: artifacts/tables
+  runs: runs

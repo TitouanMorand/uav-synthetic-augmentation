@@ -30,7 +30,7 @@ def make_metric_plot(df: pd.DataFrame, metric: str, output_path: Path) -> None:
 
     pivot = df.pivot(index="split", columns="experiment", values=metric)
 
-    ax = pivot.plot(kind="bar", figsize=(8, 5))
+    ax = pivot.plot(kind="bar", figsize=(9, 5))
     ax.set_title(f"{metric} comparison")
     ax.set_xlabel("Split")
     ax.set_ylabel(metric)
@@ -43,6 +43,38 @@ def make_metric_plot(df: pd.DataFrame, metric: str, output_path: Path) -> None:
     plt.close()
 
 
+def compute_deltas(comparison: pd.DataFrame) -> pd.DataFrame:
+    baseline = comparison[comparison["experiment"] == "baseline_real_only"].copy()
+
+    delta_rows = []
+
+    for experiment in sorted(comparison["experiment"].unique()):
+        if experiment == "baseline_real_only":
+            continue
+
+        current = comparison[comparison["experiment"] == experiment].copy()
+
+        merged = current.merge(
+            baseline,
+            on="split",
+            suffixes=("_experiment", "_baseline"),
+        )
+
+        for _, row in merged.iterrows():
+            delta_rows.append(
+                {
+                    "experiment": experiment,
+                    "split": row["split"],
+                    "precision_delta": row["precision_experiment"] - row["precision_baseline"],
+                    "recall_delta": row["recall_experiment"] - row["recall_baseline"],
+                    "map50_delta": row["map50_experiment"] - row["map50_baseline"],
+                    "map50_95_delta": row["map50_95_experiment"] - row["map50_95_baseline"],
+                }
+            )
+
+    return pd.DataFrame(delta_rows)
+
+
 def main() -> None:
     config = load_config()
 
@@ -50,12 +82,10 @@ def main() -> None:
     reports_dir = Path(config["paths"]["reports"])
     previews_dir = Path(config["paths"]["previews"])
 
-    baseline_run = config["experiments"]["baseline"]["name"]
-    classic_run = config["experiments"]["classic"]["name"]
-
     experiments = {
-        "baseline_real_only": baseline_run,
-        "real_plus_classic": classic_run,
+        "baseline_real_only": config["experiments"]["baseline"]["name"],
+        "real_plus_classic": config["experiments"]["classic"]["name"],
+        "real_plus_object_preserving": config["experiments"]["object_preserving"]["name"],
     }
 
     frames = []
@@ -67,57 +97,35 @@ def main() -> None:
 
     comparison = pd.concat(frames, ignore_index=True)
 
-    comparison_path = tables_dir / "comparison_baseline_vs_classic.csv"
+    comparison_path = tables_dir / "comparison_all_experiments.csv"
     comparison.to_csv(comparison_path, index=False)
 
-    baseline = comparison[comparison["experiment"] == "baseline_real_only"].copy()
-    classic = comparison[comparison["experiment"] == "real_plus_classic"].copy()
+    delta_df = compute_deltas(comparison)
 
-    deltas = classic.merge(
-        baseline,
-        on="split",
-        suffixes=("_classic", "_baseline"),
-    )
-
-    delta_rows = []
-
-    for _, row in deltas.iterrows():
-        delta_rows.append(
-            {
-                "split": row["split"],
-                "precision_delta": row["precision_classic"] - row["precision_baseline"],
-                "recall_delta": row["recall_classic"] - row["recall_baseline"],
-                "map50_delta": row["map50_classic"] - row["map50_baseline"],
-                "map50_95_delta": row["map50_95_classic"] - row["map50_95_baseline"],
-            }
-        )
-
-    delta_df = pd.DataFrame(delta_rows)
-    delta_path = tables_dir / "comparison_baseline_vs_classic_deltas.csv"
+    delta_path = tables_dir / "comparison_all_experiments_deltas.csv"
     delta_df.to_csv(delta_path, index=False)
 
     for metric in ["precision", "recall", "map50", "map50_95"]:
         make_metric_plot(
             comparison,
             metric=metric,
-            output_path=previews_dir / f"comparison_baseline_vs_classic_{metric}.png",
+            output_path=previews_dir / f"comparison_all_experiments_{metric}.png",
         )
 
     report = {
-        "baseline_run": baseline_run,
-        "classic_run": classic_run,
+        "experiments": experiments,
         "comparison_table": str(comparison_path),
         "delta_table": str(delta_path),
         "summary": delta_df.to_dict(orient="records"),
     }
 
-    report_path = save_json(report, reports_dir / "comparison_baseline_vs_classic_report.json")
+    report_path = save_json(report, reports_dir / "comparison_all_experiments_report.json")
 
     print("Comparison completed.")
     print(f"Comparison table: {comparison_path}")
     print(f"Delta table: {delta_path}")
     print(f"Report: {report_path}")
-    print("\nDeltas:")
+    print("\nDeltas vs baseline:")
     print(delta_df.to_string(index=False))
     print("Step 06 completed successfully.")
 

@@ -12,7 +12,7 @@ from src.train_eval import evaluate_yolo, train_yolo
 from src.utils import save_json, set_seed
 
 
-VALID_EXPERIMENTS = ["classic"]
+VALID_EXPERIMENTS = ["classic", "object_preserving"]
 
 
 def parse_args() -> argparse.Namespace:

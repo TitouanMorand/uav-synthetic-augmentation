@@ -17,23 +17,86 @@ from src.augment import read_yolo_labels
 from src.config import load_config
 from src.diffusion import DiffusionBackend
 from src.diffusion_v2 import (
+    composite_with_alpha,
     draw_boxes,
-    make_box_mask,
-    make_inpaint_mask_from_protection,
+    labels_box_stats,
+    make_feather_alpha,
     make_night_condition,
+    make_object_matte,
     overlay_mask,
+    preview_alpha,
     quality_metadata,
+    relight_object_to_context,
     save_grid,
-    soft_reinsert_object,
 )
 from src.utils import ensure_dir, resolve_device
 
 
+def run_img2img_backend(
+    backend,
+    image,
+    prompt: str,
+    negative_prompt: str,
+    strength: float,
+    guidance_scale: float,
+    steps: int,
+    seed: int,
+):
+    if hasattr(backend, "img2img"):
+        return backend.img2img(
+            image=image,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            strength=strength,
+            guidance_scale=guidance_scale,
+            steps=steps,
+            seed=seed,
+        )
+
+    if hasattr(backend, "global_img2img"):
+        return backend.global_img2img(
+            image=image,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            strength=strength,
+            guidance_scale=guidance_scale,
+            steps=steps,
+            seed=seed,
+        )
+
+    if hasattr(backend, "generate_img2img"):
+        return backend.generate_img2img(
+            image=image,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            strength=strength,
+            guidance_scale=guidance_scale,
+            steps=steps,
+            seed=seed,
+        )
+
+    available = [name for name in dir(backend) if "img" in name.lower() or "paint" in name.lower()]
+    raise AttributeError(
+        "No compatible img2img method found on DiffusionBackend. "
+        f"Available image-related methods: {available}"
+    )
+
+
+def adaptive_feather_px(max_box_side_px: float, preset_cap: int) -> int:
+    """
+    Tiny drones should not get huge feather radii.
+    """
+    value = int(round(max_box_side_px * 0.15))
+    value = max(2, value)
+    value = min(value, preset_cap)
+    return value
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate V2 diffusion hyperparameter grid.")
-    parser.add_argument("--max-images", type=int, default=20)
+    parser = argparse.ArgumentParser(description="Generate V2.2 diffusion hyperparameter grid.")
+    parser.add_argument("--max-images", type=int, default=8)
     parser.add_argument("--start", type=int, default=0)
-    parser.add_argument("--presets", nargs="+", default=["conservative", "medium", "strong"])
+    parser.add_argument("--presets", nargs="+", default=["conservative", "medium"])
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -68,10 +131,7 @@ def main() -> None:
     device = resolve_device(project_cfg["yolo"]["device"])
 
     backend = DiffusionBackend(
-        diffusion_config={
-            "inpaint_model": v2_cfg["inpaint_model"],
-            "img2img_model": "runwayml/stable-diffusion-v1-5",
-        },
+        diffusion_config={"img2img_model": v2_cfg["img2img_model"]},
         device=device,
     )
 
@@ -80,146 +140,142 @@ def main() -> None:
 
     rows = []
 
-    for row_idx, row in tqdm(list(sources.iterrows()), desc="V2 diffusion grid"):
+    for _, row in tqdm(list(sources.iterrows()), desc="V2.2 diffusion grid"):
         image_path = Path(row["image_path"])
         label_path = Path(row["label_path"])
 
         labels = read_yolo_labels(label_path)
-
         if not labels:
             continue
 
         original = Image.open(image_path).convert("RGB")
+        object_matte = make_object_matte(original, labels)
+        object_overlay = overlay_mask(original, object_matte, (255, 50, 50))
 
-        preset_outputs = []
+        box_stats = labels_box_stats(labels, image_size=original.size)
+        max_box_side = float(box_stats["max_box_side_px"])
 
         base_tiles = [
             ("original", original),
-            ("original + box", draw_boxes(original, labels)),
+            ("original + box", draw_boxes(original.copy(), labels)),
+            ("object matte", object_overlay),
         ]
+
+        preset_tiles = []
 
         for preset_name in args.presets:
             preset = v2_cfg["presets"][preset_name]
 
-            # Very tight mask used only for the conditioning image.
-            # This avoids preserving a large daytime rectangle around the drone.
-            condition_mask = make_box_mask(
-                labels=labels,
-                image_size=original.size,
-                margin_px=int(preset.get("condition_margin_px", 2)),
-                relative_margin=0.3,
-                blur_px=2,
-            )
-
-            # Strict object mask used for quality metrics and object preservation.
-            strict_mask = make_box_mask(
-                labels=labels,
-                image_size=original.size,
-                margin_px=int(preset["strict_object_margin_px"]),
-                relative_margin=0.5,
-                blur_px=0,
-            )
-
-            # Inpainting protection mask. Smaller than before to avoid large rectangular halos.
-            protection_mask = make_box_mask(
-                labels=labels,
-                image_size=original.size,
-                margin_px=int(preset["protection_margin_px"]),
-                relative_margin=0.8,
-                blur_px=0,
-            )
-
-            # Soft blending mask used after generation.
-            blend_mask = make_box_mask(
-                labels=labels,
-                image_size=original.size,
-                margin_px=int(preset["blend_margin_px"]),
-                relative_margin=1.2,
-                blur_px=int(preset["mask_blur_px"]),
-            )
-
-            inpaint_mask = make_inpaint_mask_from_protection(protection_mask)
-
             condition = make_night_condition(
-                original=original,
-                protection_mask=condition_mask,
-                condition_strength=float(preset["condition_strength"]),
-                variant_index=int(row["source_index"]),
+                image=original,
+                darkness=float(preset["darkness"]),
             )
 
-            seed = int(project_cfg["yolo"]["seed"]) + int(row["source_index"]) * 100 + hash(preset_name) % 97
+            seed = int(project_cfg["yolo"]["seed"]) + int(row["source_index"]) * 100 + (17 if preset_name == "medium" else 0)
 
-            generated_before = backend.inpaint(
+            generated_context = run_img2img_backend(
+                backend=backend,
                 image=condition,
-                inpaint_mask=inpaint_mask,
                 prompt=prompt,
                 negative_prompt=negative_prompt,
-                strength=float(preset["strength"]),
+                strength=float(preset["img2img_strength"]),
                 guidance_scale=float(preset["guidance_scale"]),
                 steps=int(preset["steps"]),
                 seed=seed,
             )
 
-            generated_after = soft_reinsert_object(
-                original=original,
-                generated=generated_before,
-                strict_mask=strict_mask,
-                blend_mask=blend_mask,
-                adapt_luminance=True,
+            feather_px = adaptive_feather_px(
+                max_box_side_px=max_box_side,
+                preset_cap=int(preset["feather_px"]),
             )
 
-            meta = quality_metadata(
-                original=original,
-                generated=generated_after,
-                strict_mask=strict_mask,
-                quality_cfg=v2_cfg["quality_gate"],
+            hard_alpha = make_feather_alpha(object_matte, feather_px=0)
+            feather_alpha = make_feather_alpha(object_matte, feather_px=feather_px)
+
+            hard_reinsert = composite_with_alpha(
+                background=generated_context,
+                foreground=original,
+                alpha_mask=hard_alpha,
             )
 
-            output_stem = f"v2_{preset_name}_{int(row['source_index']):04d}_{image_path.stem}"
-            output_image_path = output_root / preset_name / "images" / f"{output_stem}.jpg"
-            output_meta_path = output_root / preset_name / "metadata" / f"{output_stem}.json"
+            feather_reinsert = composite_with_alpha(
+                background=generated_context,
+                foreground=original,
+                alpha_mask=feather_alpha,
+            )
 
-            ensure_dir(output_image_path.parent)
-            ensure_dir(output_meta_path.parent)
+            relit_object = relight_object_to_context(
+                original=original,
+                generated_context=generated_context,
+                object_mask=object_matte,
+                ring_inner_px=int(preset["ring_inner_px"]),
+                ring_outer_px=int(preset["ring_outer_px"]),
+                relight_strength=float(preset.get("relight_strength", 0.25)),
+            )
 
-            generated_after.save(output_image_path, quality=95)
+            relight_feather_reinsert = composite_with_alpha(
+                background=generated_context,
+                foreground=relit_object,
+                alpha_mask=feather_alpha,
+            )
 
-            metadata = {
-                "preset": preset_name,
-                "source_index": int(row["source_index"]),
-                "source_image": str(image_path),
-                "source_label": str(label_path),
-                "generated_image": str(output_image_path),
-                "device": device,
-                "seed": seed,
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                **preset,
-                **meta,
-            }
+            base_stem = f"v2_{preset_name}_{int(row['source_index']):04d}_{image_path.stem}"
 
-            output_meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-            rows.append(metadata)
+            variants = [
+                ("hard_reinsert", hard_reinsert, hard_alpha),
+                ("feather_reinsert", feather_reinsert, feather_alpha),
+                ("relight_feather_reinsert", relight_feather_reinsert, feather_alpha),
+            ]
 
-            preset_outputs.append((preset_name, draw_boxes(generated_after, labels)))
+            for mode_name, mode_image, mode_alpha in variants:
+                out_img = output_root / preset_name / mode_name / "images" / f"{base_stem}.jpg"
+                out_json = output_root / preset_name / mode_name / "metadata" / f"{base_stem}.json"
 
-            print(
-                f"\n{preset_name} | "
-                f"accepted={meta['accepted_by_auto_gate']} | "
-                f"bg_diff={meta['background_region_mean_abs_diff']:.2f} | "
-                f"obj_diff={meta['object_region_mean_abs_diff']:.2f} | "
-                f"reasons={meta['rejection_reasons']}"
+                ensure_dir(out_img.parent)
+                ensure_dir(out_json.parent)
+
+                mode_image.save(out_img, quality=95)
+
+                meta = quality_metadata(
+                    original=original,
+                    generated_context=generated_context,
+                    composite=mode_image,
+                    object_mask=object_matte,
+                    alpha_mask=mode_alpha,
+                    quality_cfg=v2_cfg["quality_gate"],
+                )
+
+                payload = {
+                    "preset": preset_name,
+                    "mode": mode_name,
+                    "source_index": int(row["source_index"]),
+                    "source_image": str(image_path),
+                    "source_label": str(label_path),
+                    "generated_image": str(out_img),
+                    "seed": seed,
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "adaptive_feather_px": feather_px,
+                    **preset,
+                    **meta,
+                }
+
+                out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                rows.append(payload)
+
+            preset_tiles.extend(
+                [
+                    (f"{preset_name} condition", condition),
+                    (f"{preset_name} alpha", preview_alpha(feather_alpha)),
+                    (f"{preset_name} hard", draw_boxes(hard_reinsert.copy(), labels)),
+                    (f"{preset_name} feather", draw_boxes(feather_reinsert.copy(), labels)),
+                    (f"{preset_name} relight", draw_boxes(relight_feather_reinsert.copy(), labels)),
+                ]
             )
 
         grid_path = previews_dir / f"v2_grid_{int(row['source_index']):04d}_{image_path.stem}.jpg"
-
         save_grid(
-            tiles=[
-                *base_tiles,
-                ("condition", condition),
-                ("protect mask", overlay_mask(original, protection_mask, (255, 40, 40))),
-                *preset_outputs,
-            ],
+            tiles=[*base_tiles, *preset_tiles],
             output_path=grid_path,
             tile_size=220,
         )
@@ -230,13 +286,16 @@ def main() -> None:
     df.to_csv(results_path, index=False)
 
     summary = (
-        df.groupby("preset")
+        df.groupby(["preset", "mode"])
         .agg(
-            count=("preset", "count"),
-            accepted=("accepted_by_auto_gate", "sum"),
+            count=("mode", "count"),
+            auto_gate_pass_count=("accepted_by_auto_gate", "sum"),
+            auto_gate_pass_rate=("accepted_by_auto_gate", "mean"),
             mean_background_diff=("background_region_mean_abs_diff", "mean"),
             mean_object_diff=("object_region_mean_abs_diff", "mean"),
-            mean_mask_coverage=("mask_coverage", "mean"),
+            mean_context_diff=("context_region_mean_abs_diff", "mean"),
+            mean_halo_score=("halo_score", "mean"),
+            mean_adaptive_feather_px=("adaptive_feather_px", "mean"),
         )
         .reset_index()
     )
@@ -244,7 +303,7 @@ def main() -> None:
     summary_path = tables_dir / "diffusion_v2_grid_summary.csv"
     summary.to_csv(summary_path, index=False)
 
-    print("\nV2 diffusion grid completed.")
+    print("\nV2.2 diffusion grid completed.")
     print(f"Results: {results_path}")
     print(f"Summary: {summary_path}")
     print(f"Preview dir: {previews_dir}")

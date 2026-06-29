@@ -16,8 +16,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.augment import read_yolo_labels
 from src.config import load_config
 from src.diffusion_v2 import (
-    compute_internal_rectangle_score,
     compute_inset_window_score,
+    compute_internal_rectangle_score,
     compute_mask_coverage,
     compute_ui_rectangle_score,
     compute_vertical_seam_score,
@@ -96,16 +96,8 @@ def main() -> None:
     args = parse_args()
 
     config = load_config()
-
     diffusion_cfg = yaml.safe_load(Path("configs/diffusion_v2.yaml").read_text())["diffusion_v2"]
     source_cfg = diffusion_cfg["source_filter"]
-
-    dataset_root = Path(config["experiments"]["baseline"]["dataset_root"])
-    image_dir = dataset_root / "images" / "train"
-    label_dir = dataset_root / "labels" / "train"
-
-    tables_dir = ensure_dir(config["paths"]["tables"])
-    previews_dir = ensure_dir(Path(config["paths"]["previews"]) / "diffusion_v2_sources")
 
     blacklist_path = Path("configs/diffusion_source_blacklist.txt")
     blacklisted_indices = set()
@@ -116,6 +108,13 @@ def main() -> None:
             if not line or line.startswith("#"):
                 continue
             blacklisted_indices.add(int(line))
+
+    dataset_root = Path(config["experiments"]["baseline"]["dataset_root"])
+    image_dir = dataset_root / "images" / "train"
+    label_dir = dataset_root / "labels" / "train"
+
+    tables_dir = ensure_dir(config["paths"]["tables"])
+    previews_dir = ensure_dir(Path(config["paths"]["previews"]) / "diffusion_v2_sources")
 
     rows = []
     accepted_preview_paths = []
@@ -129,18 +128,12 @@ def main() -> None:
             continue
 
         image = cv2.imread(str(image_path))
-
         if image is None:
             continue
 
         h_img, w_img = image.shape[:2]
 
-        mask_coverage = compute_mask_coverage(
-            labels=labels,
-            image_size=(w_img, h_img),
-            margin_px=0,
-        )
-
+        mask_coverage = compute_mask_coverage(labels=labels, image_size=(w_img, h_img), margin_px=0)
         rect_score = compute_internal_rectangle_score(image)
         seam_score = compute_vertical_seam_score(image)
         ui_score = compute_ui_rectangle_score(image)
@@ -164,9 +157,6 @@ def main() -> None:
         if inset_score > float(source_cfg["max_inset_window_score"]):
             reasons.append("inset_window_score_high")
 
-        if source_index in blacklisted_indices:
-            reasons.append("manual_blacklist")
-
         if box_stats["max_box_side_px"] < float(source_cfg["min_box_max_side_px"]):
             reasons.append("box_too_tiny_for_diffusion_source")
 
@@ -175,6 +165,9 @@ def main() -> None:
 
         if box_stats["max_box_area_ratio"] > float(source_cfg["max_box_area_ratio"]):
             reasons.append("box_area_ratio_too_large")
+
+        if source_index in blacklisted_indices:
+            reasons.append("manual_blacklist")
 
         accepted = len(reasons) == 0
 
@@ -200,6 +193,7 @@ def main() -> None:
                 "source_index": source_index,
                 "accepted": accepted,
                 "rejection_reasons": ";".join(reasons),
+                "manual_blacklisted": source_index in blacklisted_indices,
                 "image_path": str(image_path),
                 "label_path": str(label_path),
                 "width": w_img,
@@ -210,7 +204,6 @@ def main() -> None:
                 "vertical_seam_score": seam_score,
                 "ui_rectangle_score": ui_score,
                 "inset_window_score": inset_score,
-                "manual_blacklisted": source_index in blacklisted_indices,
                 **box_stats,
             }
         )
@@ -225,15 +218,8 @@ def main() -> None:
     df[df["accepted"]].to_csv(accepted_path, index=False)
     df[~df["accepted"]].to_csv(rejected_path, index=False)
 
-    make_contact_sheet(
-        accepted_preview_paths,
-        previews_dir / "accepted_contact_sheet.jpg",
-    )
-
-    make_contact_sheet(
-        rejected_preview_paths,
-        previews_dir / "rejected_contact_sheet.jpg",
-    )
+    make_contact_sheet(accepted_preview_paths, previews_dir / "accepted_contact_sheet.jpg")
+    make_contact_sheet(rejected_preview_paths, previews_dir / "rejected_contact_sheet.jpg")
 
     print("Diffusion source filtering completed.")
     print(f"Total candidates: {len(df)}")
@@ -243,6 +229,22 @@ def main() -> None:
     print(f"Accepted CSV: {accepted_path}")
     print(f"Rejected CSV: {rejected_path}")
     print(f"Preview dir: {previews_dir}")
+
+    suspicious = df.sort_values("inset_window_score", ascending=False).head(20)
+    print("\nTop 20 inset_window_score:")
+    print(
+        suspicious[
+            [
+                "source_index",
+                "accepted",
+                "inset_window_score",
+                "ui_rectangle_score",
+                "internal_rectangle_score",
+                "vertical_seam_score",
+                "image_path",
+            ]
+        ].to_string(index=False)
+    )
 
 
 if __name__ == "__main__":

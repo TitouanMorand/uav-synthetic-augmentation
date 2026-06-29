@@ -5,15 +5,37 @@ from typing import Any
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageDraw
 
-from src.diffusion import (
-    DiffusionBackend,
-    compute_diff_stats,
-    image_pixel_stats,
-    is_suspicious_black_image,
-)
 from src.utils import ensure_dir
+
+
+# =========================
+# Basic geometry / drawing
+# =========================
+
+def _to_rgb_pil(image: Image.Image) -> Image.Image:
+    return image.convert("RGB")
+
+
+def _labels_to_xyxy(labels, image_size: tuple[int, int]) -> list[tuple[int, int, int, int]]:
+    width, height = image_size
+    boxes = []
+
+    for _, x, y, w, h in labels:
+        x1 = int(round((x - w / 2) * width))
+        y1 = int(round((y - h / 2) * height))
+        x2 = int(round((x + w / 2) * width))
+        y2 = int(round((y + h / 2) * height))
+
+        x1 = max(0, min(width - 1, x1))
+        y1 = max(0, min(height - 1, y1))
+        x2 = max(x1 + 1, min(width, x2))
+        y2 = max(y1 + 1, min(height, y2))
+
+        boxes.append((x1, y1, x2, y2))
+
+    return boxes
 
 
 def labels_box_stats(labels, image_size: tuple[int, int]) -> dict[str, float]:
@@ -24,14 +46,14 @@ def labels_box_stats(labels, image_size: tuple[int, int]) -> dict[str, float]:
     areas = []
     area_ratios = []
 
-    for _, x, y, w, h in labels:
-        box_w = w * width
-        box_h = h * height
-        box_area = box_w * box_h
+    for x1, y1, x2, y2 in _labels_to_xyxy(labels, image_size):
+        box_w = x2 - x1
+        box_h = y2 - y1
+        area = box_w * box_h
 
         max_sides.append(max(box_w, box_h))
-        areas.append(box_area)
-        area_ratios.append(box_area / image_area)
+        areas.append(area)
+        area_ratios.append(area / image_area)
 
     return {
         "max_box_side_px": float(max(max_sides)) if max_sides else 0.0,
@@ -41,56 +63,52 @@ def labels_box_stats(labels, image_size: tuple[int, int]) -> dict[str, float]:
     }
 
 
-def make_box_mask(
-    labels,
-    image_size: tuple[int, int],
-    margin_px: int,
-    relative_margin: float = 1.0,
-    blur_px: int = 0,
-) -> Image.Image:
+def draw_boxes(image: Image.Image, labels) -> Image.Image:
+    image = _to_rgb_pil(image)
+    draw = ImageDraw.Draw(image)
+
+    for x1, y1, x2, y2 in _labels_to_xyxy(labels, image.size):
+        draw.rectangle([x1, y1, x2, y2], outline="lime", width=3)
+
+    return image
+
+
+def overlay_mask(image: Image.Image, mask: Image.Image, color: tuple[int, int, int]) -> Image.Image:
+    image_arr = np.array(_to_rgb_pil(image)).astype(np.uint8)
+    mask_arr = np.array(mask.convert("L")) > 0
+
+    overlay = image_arr.copy()
+    overlay[mask_arr] = color
+
+    blended = cv2.addWeighted(image_arr, 0.65, overlay, 0.35, 0)
+    return Image.fromarray(blended)
+
+
+def preview_alpha(alpha_mask: Image.Image) -> Image.Image:
+    arr = np.array(alpha_mask.convert("L"))
+    rgb = np.stack([arr, arr, arr], axis=-1)
+    return Image.fromarray(rgb.astype(np.uint8))
+
+
+# =========================
+# Source filtering heuristics
+# =========================
+
+def compute_mask_coverage(labels, image_size: tuple[int, int], margin_px: int = 0) -> float:
     width, height = image_size
     mask = np.zeros((height, width), dtype=np.uint8)
 
-    for _, x, y, w, h in labels:
-        box_w = w * width
-        box_h = h * height
+    for x1, y1, x2, y2 in _labels_to_xyxy(labels, image_size):
+        x1 = max(0, x1 - margin_px)
+        y1 = max(0, y1 - margin_px)
+        x2 = min(width, x2 + margin_px)
+        y2 = min(height, y2 + margin_px)
+        mask[y1:y2, x1:x2] = 1
 
-        margin_x = int(round(max(margin_px, box_w * relative_margin)))
-        margin_y = int(round(max(margin_px, box_h * relative_margin)))
-
-        x1 = int((x - w / 2) * width) - margin_x
-        y1 = int((y - h / 2) * height) - margin_y
-        x2 = int((x + w / 2) * width) + margin_x
-        y2 = int((y + h / 2) * height) + margin_y
-
-        x1 = max(0, min(width - 1, x1))
-        y1 = max(0, min(height - 1, y1))
-        x2 = max(0, min(width, x2))
-        y2 = max(0, min(height, y2))
-
-        if x2 > x1 and y2 > y1:
-            mask[y1:y2, x1:x2] = 255
-
-    pil = Image.fromarray(mask, mode="L")
-
-    if blur_px > 0:
-        pil = pil.filter(ImageFilter.GaussianBlur(radius=blur_px))
-
-    return pil
-
-
-def compute_mask_coverage(labels, image_size: tuple[int, int], margin_px: int = 0) -> float:
-    mask = make_box_mask(labels, image_size=image_size, margin_px=int(margin_px), relative_margin=0.0)
-    arr = np.array(mask.convert("L")) > 0
-    return float(arr.mean())
+    return float(mask.mean())
 
 
 def compute_internal_rectangle_score(image_bgr: np.ndarray) -> float:
-    """
-    Heuristic for picture-in-picture / screen / UI rectangles.
-
-    Returns roughly the largest internal rectangular contour area ratio.
-    """
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 80, 160)
 
@@ -107,37 +125,68 @@ def compute_internal_rectangle_score(image_bgr: np.ndarray) -> float:
         if area_ratio < 0.04 or area_ratio > 0.75:
             continue
 
-        # Ignore rectangles touching image border.
-        if x < 5 or y < 5 or x + bw > w - 5 or y + bh > h - 5:
+        if x < 8 or y < 8 or x + bw > w - 8 or y + bh > h - 8:
             continue
 
-        rect_area = bw * bh
+        rect_area = max(bw * bh, 1)
         contour_area = cv2.contourArea(contour)
-        rectangularity = contour_area / max(rect_area, 1)
+        rectangularity = contour_area / rect_area
 
-        score = area_ratio * min(1.0, rectangularity * 2.0)
+        if rectangularity < 0.12:
+            continue
+
+        score = area_ratio * rectangularity
+        best_score = max(best_score, float(score))
+
+    return best_score
+
+
+def compute_ui_rectangle_score(image_bgr: np.ndarray) -> float:
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 60, 150)
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    h, w = gray.shape[:2]
+    image_area = h * w
+    best_score = 0.0
+
+    for contour in contours:
+        x, y, bw, bh = cv2.boundingRect(contour)
+        area_ratio = (bw * bh) / max(image_area, 1)
+
+        if area_ratio < 0.008 or area_ratio > 0.55:
+            continue
+
+        touches_border = (
+            x < 8 or y < 8 or x + bw > w - 8 or y + bh > h - 8
+        )
+
+        if not touches_border:
+            continue
+
+        rect_area = max(bw * bh, 1)
+        contour_area = cv2.contourArea(contour)
+        rectangularity = contour_area / rect_area
+
+        if rectangularity < 0.10:
+            continue
+
+        score = area_ratio * rectangularity * 1.5
         best_score = max(best_score, float(score))
 
     return best_score
 
 
 def compute_vertical_seam_score(image_bgr: np.ndarray) -> float:
-    """
-    Detect abrupt vertical seams that often indicate split-screen or inset artifacts.
-    """
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    if gray.shape[1] < 2:
+        return 0.0
 
     col_diff = np.abs(gray[:, 1:] - gray[:, :-1]).mean(axis=0)
 
-    if len(col_diff) == 0:
-        return 0.0
-
-    h, w = gray.shape[:2]
-
-    # Focus on internal seams, ignore image borders.
-    start = int(w * 0.15)
-    end = int(w * 0.85)
-
+    start = int(gray.shape[1] * 0.15)
+    end = int(gray.shape[1] * 0.85)
     internal = col_diff[start:end]
 
     if len(internal) == 0:
@@ -146,169 +195,449 @@ def compute_vertical_seam_score(image_bgr: np.ndarray) -> float:
     return float(np.percentile(internal, 99))
 
 
-def make_inpaint_mask_from_protection(protection_mask: Image.Image) -> Image.Image:
+def compute_inset_window_score(image_bgr: np.ndarray) -> float:
     """
-    Diffusers convention:
-    white = repaint
-    black = preserve
+    Heuristic for picture-in-picture / embedded camera window.
+
+    The previous version was too restrictive and often returned 0.
+    This version explicitly tests common window locations and scores
+    rectangular borders + color discontinuity.
     """
-    return ImageOps.invert(protection_mask.convert("L"))
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(gray, 60, 150)
+    edges01 = (edges > 0).astype(np.float32)
+
+    h, w = gray.shape[:2]
+    if h < 64 or w < 64:
+        return 0.0
+
+    best_score = 0.0
+
+    width_fracs = [0.18, 0.24, 0.30, 0.36]
+    height_fracs = [0.14, 0.18, 0.22, 0.28]
+
+    anchors = [
+        ("bottom_left", 0.03, 0.97, 0.97, 0.03),
+        ("bottom_right", 0.97, 0.97, 0.03, 0.03),
+        ("bottom_center", 0.50, 0.97, 0.50, 0.03),
+        ("top_left", 0.03, 0.03, 0.97, 0.97),
+        ("top_right", 0.97, 0.03, 0.03, 0.97),
+    ]
+
+    for wf in width_fracs:
+        for hf in height_fracs:
+            ww = int(round(w * wf))
+            hh = int(round(h * hf))
+            if ww < 24 or hh < 24:
+                continue
+
+            for name, ax, ay, _, _ in anchors:
+                if "left" in name:
+                    x1 = int(round(w * 0.03))
+                elif "right" in name:
+                    x1 = w - ww - int(round(w * 0.03))
+                else:
+                    x1 = (w - ww) // 2
+
+                if "top" in name:
+                    y1 = int(round(h * 0.03))
+                else:
+                    y1 = h - hh - int(round(h * 0.03))
+
+                x2 = x1 + ww
+                y2 = y1 + hh
+
+                if x1 < 0 or y1 < 0 or x2 > w or y2 > h:
+                    continue
+
+                band = max(2, int(min(h, w) * 0.008))
+                if x2 - x1 <= 2 * band or y2 - y1 <= 2 * band:
+                    continue
+
+                # Border edge density
+                border_mask = np.zeros((h, w), dtype=np.uint8)
+                cv2.rectangle(border_mask, (x1, y1), (x2 - 1, y2 - 1), 1, thickness=band)
+
+                border_edge_density = float(edges01[border_mask > 0].mean()) if np.any(border_mask > 0) else 0.0
+
+                # Inside/outside intensity discontinuity
+                inside = gray[y1 + band:y2 - band, x1 + band:x2 - band]
+                if inside.size == 0:
+                    continue
+
+                outer_ring_mask = np.zeros((h, w), dtype=np.uint8)
+                ox1 = max(0, x1 - 2 * band)
+                oy1 = max(0, y1 - 2 * band)
+                ox2 = min(w, x2 + 2 * band)
+                oy2 = min(h, y2 + 2 * band)
+
+                outer_ring_mask[oy1:oy2, ox1:ox2] = 1
+                outer_ring_mask[y1:y2, x1:x2] = 0
+
+                if np.any(outer_ring_mask > 0):
+                    outer_mean = float(gray[outer_ring_mask > 0].mean())
+                else:
+                    outer_mean = float(inside.mean())
+
+                color_jump = abs(float(inside.mean()) - outer_mean) / 255.0
+
+                area_ratio = (ww * hh) / max(h * w, 1)
+                location_bonus = 1.20 if ("bottom" in name or "top" in name) else 1.0
+
+                score = location_bonus * (
+                    0.70 * border_edge_density +
+                    0.25 * color_jump +
+                    0.05 * min(1.0, area_ratio / 0.08)
+                )
+
+                best_score = max(best_score, float(score))
+
+    return best_score
 
 
-def make_night_condition(
-    original: Image.Image,
-    protection_mask: Image.Image,
-    condition_strength: float,
-    variant_index: int,
-) -> Image.Image:
-    """
-    Create a night-like conditioning image.
+# =========================
+# Object matte / alpha / relighting
+# =========================
 
-    The protected region is preserved. The editable background becomes dark blue,
-    low-light, noisy and slightly vignetted. This pushes inpainting toward night
-    without asking the model to invent an entirely unrelated scene.
-    """
-    original = original.convert("RGB")
-    arr = np.array(original).astype(np.float32)
+def _ellipse_mask_for_box(box: tuple[int, int, int, int], image_size: tuple[int, int]) -> np.ndarray:
+    width, height = image_size
+    mask = np.zeros((height, width), dtype=np.uint8)
+    x1, y1, x2, y2 = box
 
-    alpha = np.array(protection_mask.convert("L")).astype(np.float32) / 255.0
+    cx = (x1 + x2) // 2
+    cy = (y1 + y2) // 2
+    ax = max(2, int((x2 - x1) * 0.60))
+    ay = max(2, int((y2 - y1) * 0.60))
+
+    cv2.ellipse(mask, (cx, cy), (ax // 2, ay // 2), 0, 0, 360, 255, -1)
+    return mask
+
+
+def make_object_matte(image: Image.Image, labels) -> Image.Image:
+    """
+    Build an approximate object silhouette from the YOLO box.
+    Uses GrabCut when possible, otherwise falls back to an ellipse.
+    """
+    image = _to_rgb_pil(image)
+    image_arr = np.array(image)
+    height, width = image_arr.shape[:2]
+
+    final_mask = np.zeros((height, width), dtype=np.uint8)
+
+    boxes = _labels_to_xyxy(labels, image.size)
+
+    for box in boxes:
+        x1, y1, x2, y2 = box
+        bw = x2 - x1
+        bh = y2 - y1
+
+        pad_x = max(10, int(bw * 1.2))
+        pad_y = max(10, int(bh * 1.2))
+
+        rx1 = max(0, x1 - pad_x)
+        ry1 = max(0, y1 - pad_y)
+        rx2 = min(width, x2 + pad_x)
+        ry2 = min(height, y2 + pad_y)
+
+        roi = image_arr[ry1:ry2, rx1:rx2].copy()
+        roi_h, roi_w = roi.shape[:2]
+
+        # Tiny object fallback
+        if roi_h < 12 or roi_w < 12 or bw < 6 or bh < 6:
+            final_mask = np.maximum(final_mask, _ellipse_mask_for_box(box, image.size))
+            continue
+
+        local_x1 = x1 - rx1
+        local_y1 = y1 - ry1
+        local_x2 = x2 - rx1
+        local_y2 = y2 - ry1
+
+        gc_mask = np.full((roi_h, roi_w), cv2.GC_PR_BGD, dtype=np.uint8)
+
+        # Probable foreground in the box
+        gc_mask[local_y1:local_y2, local_x1:local_x2] = cv2.GC_PR_FGD
+
+        # Strong foreground in the inner box
+        ix1 = local_x1 + max(1, int(0.20 * bw))
+        iy1 = local_y1 + max(1, int(0.20 * bh))
+        ix2 = local_x2 - max(1, int(0.20 * bw))
+        iy2 = local_y2 - max(1, int(0.20 * bh))
+
+        if ix2 > ix1 and iy2 > iy1:
+            gc_mask[iy1:iy2, ix1:ix2] = cv2.GC_FGD
+
+        # Border as probable background
+        border = 3
+        gc_mask[:border, :] = cv2.GC_BGD
+        gc_mask[-border:, :] = cv2.GC_BGD
+        gc_mask[:, :border] = cv2.GC_BGD
+        gc_mask[:, -border:] = cv2.GC_BGD
+
+        bgd_model = np.zeros((1, 65), np.float64)
+        fgd_model = np.zeros((1, 65), np.float64)
+
+        try:
+            cv2.grabCut(roi, gc_mask, None, bgd_model, fgd_model, 2, cv2.GC_INIT_WITH_MASK)
+            roi_fg = np.where(
+                (gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD),
+                255,
+                0,
+            ).astype(np.uint8)
+
+            # Morph cleanup
+            kernel = np.ones((3, 3), np.uint8)
+            roi_fg = cv2.morphologyEx(roi_fg, cv2.MORPH_OPEN, kernel, iterations=1)
+            roi_fg = cv2.morphologyEx(roi_fg, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+            area = int((roi_fg > 0).sum())
+            box_area = max(1, bw * bh)
+
+            # If GrabCut clearly failed, fallback to ellipse
+            if area < 0.05 * box_area or area > 3.0 * box_area:
+                ellipse_mask = _ellipse_mask_for_box(box, image.size)
+                final_mask = np.maximum(final_mask, ellipse_mask)
+            else:
+                final_mask[ry1:ry2, rx1:rx2] = np.maximum(final_mask[ry1:ry2, rx1:rx2], roi_fg)
+
+        except Exception:
+            ellipse_mask = _ellipse_mask_for_box(box, image.size)
+            final_mask = np.maximum(final_mask, ellipse_mask)
+
+    if (final_mask > 0).sum() == 0 and boxes:
+        for box in boxes:
+            final_mask = np.maximum(final_mask, _ellipse_mask_for_box(box, image.size))
+
+    return Image.fromarray(final_mask, mode="L")
+
+
+def make_feather_alpha(object_mask: Image.Image, feather_px: int) -> Image.Image:
+    """
+    alpha = 1 on the object, then gradually decays to 0 outside the object.
+    This is the true soft alpha transition we need to avoid halo / hard collage.
+    """
+    mask = np.array(object_mask.convert("L")) > 0
+
+    if feather_px <= 0:
+        return Image.fromarray((mask.astype(np.uint8) * 255), mode="L")
+
+    outside = (~mask).astype(np.uint8)
+    dist_out = cv2.distanceTransform(outside, cv2.DIST_L2, 5)
+
+    alpha = np.ones(mask.shape, dtype=np.float32)
+    alpha[~mask] = np.clip(1.0 - (dist_out[~mask] / float(feather_px)), 0.0, 1.0)
+    alpha[mask] = 1.0
+
+    return Image.fromarray(np.clip(alpha * 255.0, 0, 255).astype(np.uint8), mode="L")
+
+
+def composite_with_alpha(background: Image.Image, foreground: Image.Image, alpha_mask: Image.Image) -> Image.Image:
+    bg = np.array(_to_rgb_pil(background)).astype(np.float32)
+    fg = np.array(_to_rgb_pil(foreground)).astype(np.float32)
+    alpha = np.array(alpha_mask.convert("L")).astype(np.float32) / 255.0
     alpha = alpha[:, :, None]
 
-    night = arr.copy()
-
-    # RGB night transform.
-    night[:, :, 0] = night[:, :, 0] * 0.13
-    night[:, :, 1] = night[:, :, 1] * 0.20
-    night[:, :, 2] = night[:, :, 2] * 0.42 + 16
-
-    height, width = night.shape[:2]
-
-    y = np.linspace(1.10, 0.70, height).reshape(height, 1, 1)
-    night = night * y
-
-    yy, xx = np.mgrid[0:height, 0:width]
-    cx, cy = width / 2, height / 2
-    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / max(np.sqrt(cx ** 2 + cy ** 2), 1)
-    vignette = 1.0 - 0.35 * dist
-    night = night * vignette[:, :, None]
-
-    rng = np.random.default_rng(variant_index + 42)
-    night = night + rng.normal(0, 4.0, night.shape)
-
-    night = np.clip(night, 0, 255)
-
-    conditioned_background = (
-        arr * (1.0 - condition_strength)
-        + night * condition_strength
-    )
-
-    conditioned = conditioned_background * (1.0 - alpha) + arr * alpha
-    conditioned = np.clip(conditioned, 0, 255).astype(np.uint8)
-
-    return Image.fromarray(conditioned)
+    out = fg * alpha + bg * (1.0 - alpha)
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    return Image.fromarray(out, mode="RGB")
 
 
-def local_luminance_adapt(
+def make_night_condition(image: Image.Image, darkness: float = 0.85) -> Image.Image:
+    """
+    Build a global low-light version of the image.
+    Important: no preserved rectangular patch around the drone.
+    """
+    arr = np.array(_to_rgb_pil(image)).astype(np.float32)
+    h, w = arr.shape[:2]
+
+    # Darken + cool down
+    arr[..., 0] *= (0.30 - 0.08 * darkness)   # R
+    arr[..., 1] *= (0.38 - 0.08 * darkness)   # G
+    arr[..., 2] *= (0.55 - 0.08 * darkness)   # B
+    arr[..., 2] += 22.0 * darkness
+
+    # Mild vertical illumination gradient
+    grad = np.linspace(1.05, 0.75, h).reshape(h, 1, 1)
+    arr *= grad
+
+    # Mild vignette
+    yy, xx = np.mgrid[0:h, 0:w]
+    cx, cy = w / 2.0, h / 2.0
+    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    dist /= max(np.sqrt(cx ** 2 + cy ** 2), 1.0)
+    vignette = 1.0 - 0.18 * dist
+    arr *= vignette[:, :, None]
+
+    # Mild sensor noise
+    rng = np.random.default_rng(123)
+    arr += rng.normal(0, 3.0, arr.shape)
+
+    arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr, mode="RGB")
+
+
+
+def relight_object_to_context(
     original: Image.Image,
-    generated: Image.Image,
-    strict_mask: Image.Image,
+    generated_context: Image.Image,
+    object_mask: Image.Image,
+    ring_inner_px: int = 4,
+    ring_outer_px: int = 18,
+    relight_strength: float = 0.25,
 ) -> Image.Image:
     """
-    Adjust the reinserted object brightness to reduce pasted-object artifacts.
-    The object geometry remains the original one, but its luminance is slightly
-    adapted to the generated context.
+    Conservative relighting:
+    - mainly adapts luminance (L channel),
+    - only very small color correction,
+    - blends back with the original object to avoid over-darkening.
     """
-    orig = np.array(original.convert("RGB")).astype(np.float32)
-    gen = np.array(generated.convert("RGB")).astype(np.float32)
+    original_rgb = np.array(_to_rgb_pil(original)).astype(np.uint8)
+    context_rgb = np.array(_to_rgb_pil(generated_context)).astype(np.uint8)
+    mask = (np.array(object_mask.convert("L")) > 0).astype(np.uint8)
 
-    mask = np.array(strict_mask.convert("L")) > 0
+    if mask.sum() == 0:
+        return _to_rgb_pil(original)
 
-    if not mask.any():
-        return original.convert("RGB")
+    kernel_inner = np.ones((max(1, ring_inner_px), max(1, ring_inner_px)), np.uint8)
+    kernel_outer = np.ones((max(1, ring_outer_px), max(1, ring_outer_px)), np.uint8)
 
-    kernel = np.ones((35, 35), np.uint8)
-    dilated = cv2.dilate(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
-    ring = dilated & (~mask)
+    dilated_inner = cv2.dilate(mask, kernel_inner, iterations=1)
+    dilated_outer = cv2.dilate(mask, kernel_outer, iterations=1)
+
+    ring = (dilated_outer > 0) & (dilated_inner == 0)
+    obj_mask = mask > 0
 
     if not ring.any():
-        return original.convert("RGB")
+        return _to_rgb_pil(original)
 
-    orig_lum = orig.mean(axis=2)
-    gen_lum = gen.mean(axis=2)
+    orig_lab = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    ctx_lab = cv2.cvtColor(context_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
 
-    orig_ring = float(orig_lum[ring].mean())
-    gen_ring = float(gen_lum[ring].mean())
+    relit_lab = orig_lab.copy()
 
-    if orig_ring <= 1:
-        factor = 1.0
-    else:
-        factor = gen_ring / orig_ring
+    orig_ring_mean = orig_lab[ring].mean(axis=0)
+    orig_ring_std = orig_lab[ring].std(axis=0) + 1e-6
+    ctx_ring_mean = ctx_lab[ring].mean(axis=0)
+    ctx_ring_std = ctx_lab[ring].std(axis=0) + 1e-6
 
-    factor = float(np.clip(factor, 0.45, 1.15))
+    # --- L channel: conservative partial adaptation
+    L = relit_lab[..., 0]
+    L_obj = L[obj_mask].copy()
 
-    adapted = orig.copy()
-    adapted[mask] = np.clip(adapted[mask] * factor, 0, 255)
+    scale_L = np.clip(ctx_ring_std[0] / orig_ring_std[0], 0.90, 1.08)
+    target_L = (L_obj - orig_ring_mean[0]) * scale_L + ctx_ring_mean[0]
 
-    return Image.fromarray(adapted.astype(np.uint8))
+    # Partial move only, to avoid over-darkening.
+    L_obj = (1.0 - relight_strength) * L_obj + relight_strength * target_L
+    L[obj_mask] = np.clip(L_obj, 0, 255)
+
+    # --- A/B channels: only tiny mean shifts
+    for ch, max_shift in [(1, 4.0), (2, 6.0)]:
+        C = relit_lab[..., ch]
+        C_obj = C[obj_mask].copy()
+
+        shift = float(np.clip(ctx_ring_mean[ch] - orig_ring_mean[ch], -max_shift, max_shift))
+        C_obj = C_obj + relight_strength * shift
+        C[obj_mask] = np.clip(C_obj, 0, 255)
+
+    relit_rgb_full = cv2.cvtColor(relit_lab.astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32)
+
+    # Final safety blend with the original object.
+    blended = original_rgb.astype(np.float32).copy()
+    for c in range(3):
+        blended[..., c][obj_mask] = (
+            (1.0 - relight_strength) * original_rgb[..., c][obj_mask].astype(np.float32)
+            + relight_strength * relit_rgb_full[..., c][obj_mask]
+        )
+
+    blended = np.clip(blended, 0, 255).astype(np.uint8)
+    return Image.fromarray(blended, mode="RGB")
 
 
-def soft_reinsert_object(
+# =========================
+# Metrics / quality gate
+# =========================
+
+def _mean_abs_diff(a: np.ndarray, b: np.ndarray, mask: np.ndarray | None = None) -> float:
+    diff = np.abs(a.astype(np.float32) - b.astype(np.float32)).mean(axis=-1)
+    if mask is None:
+        return float(diff.mean())
+    if mask.sum() == 0:
+        return 0.0
+    return float(diff[mask].mean())
+
+
+def _pixel_stats(image: Image.Image) -> dict[str, float]:
+    arr = np.array(_to_rgb_pil(image)).astype(np.float32)
+    return {
+        "mean": float(arr.mean()),
+        "std": float(arr.std()),
+        "min": float(arr.min()),
+        "max": float(arr.max()),
+    }
+
+
+def is_suspicious_black_image(image: Image.Image) -> bool:
+    stats = _pixel_stats(image)
+    return stats["mean"] < 6.0 or stats["max"] < 20.0
+
+
+def quality_metadata(
     original: Image.Image,
-    generated: Image.Image,
-    strict_mask: Image.Image,
-    blend_mask: Image.Image,
-    adapt_luminance: bool = True,
-) -> Image.Image:
-    original = original.convert("RGB")
-    generated = generated.convert("RGB")
+    generated_context: Image.Image,
+    composite: Image.Image,
+    object_mask: Image.Image,
+    alpha_mask: Image.Image,
+    quality_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    orig = np.array(_to_rgb_pil(original))
+    ctx = np.array(_to_rgb_pil(generated_context))
+    comp = np.array(_to_rgb_pil(composite))
 
-    if generated.size != original.size:
-        generated = generated.resize(original.size, Image.Resampling.LANCZOS)
+    obj = np.array(object_mask.convert("L")) > 0
+    alpha = np.array(alpha_mask.convert("L")).astype(np.float32) / 255.0
 
-    source = local_luminance_adapt(original, generated, strict_mask) if adapt_luminance else original
+    background_mask = alpha < 0.01
+    transition_mask = (alpha > 0.01) & (alpha < 0.99)
 
-    src = np.array(source).astype(np.float32)
-    gen = np.array(generated).astype(np.float32)
+    background_diff = _mean_abs_diff(orig, comp, background_mask)
+    object_diff = _mean_abs_diff(orig, comp, obj)
+    halo_score = _mean_abs_diff(ctx, comp, transition_mask)
+    context_diff = _mean_abs_diff(orig, ctx, background_mask)
 
-    alpha = np.array(blend_mask.convert("L")).astype(np.float32) / 255.0
-    alpha = alpha[:, :, None]
+    suspicious_black = is_suspicious_black_image(composite)
 
-    out = src * alpha + gen * (1.0 - alpha)
-    out = np.clip(out, 0, 255).astype(np.uint8)
+    reasons = []
 
-    return Image.fromarray(out)
+    if quality_cfg.get("reject_black_images", True) and suspicious_black:
+        reasons.append("suspicious_black_image")
+
+    if background_diff < float(quality_cfg["min_background_diff"]):
+        reasons.append("background_diff_too_low")
+
+    if halo_score > float(quality_cfg["max_halo_score"]):
+        reasons.append("halo_score_too_high")
+
+    if object_diff > float(quality_cfg["max_object_diff"]):
+        reasons.append("object_diff_too_high")
+
+    return {
+        "accepted_by_auto_gate": len(reasons) == 0,
+        "rejection_reasons": reasons,
+        "background_region_mean_abs_diff": background_diff,
+        "object_region_mean_abs_diff": object_diff,
+        "context_region_mean_abs_diff": context_diff,
+        "halo_score": halo_score,
+        "mask_coverage": float(obj.mean()),
+        "output_pixel_mean": float(comp.mean()),
+        "output_pixel_std": float(comp.std()),
+        "suspicious_black_image": suspicious_black,
+    }
 
 
-def draw_boxes(image: Image.Image, labels) -> Image.Image:
-    arr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
-    height, width = arr.shape[:2]
-
-    for _, x, y, w, h in labels:
-        x1 = int((x - w / 2) * width)
-        y1 = int((y - h / 2) * height)
-        x2 = int((x + w / 2) * width)
-        y2 = int((y + h / 2) * height)
-
-        x1 = max(0, min(width - 1, x1))
-        y1 = max(0, min(height - 1, y1))
-        x2 = max(0, min(width - 1, x2))
-        y2 = max(0, min(height - 1, y2))
-
-        cv2.rectangle(arr, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-    return Image.fromarray(cv2.cvtColor(arr, cv2.COLOR_BGR2RGB))
-
-
-def overlay_mask(image: Image.Image, mask: Image.Image, color: tuple[int, int, int]) -> Image.Image:
-    image_arr = np.array(image.convert("RGB"))
-    mask_arr = np.array(mask.convert("L"))
-
-    overlay = image_arr.copy()
-    overlay[mask_arr > 0] = color
-
-    blended = cv2.addWeighted(image_arr, 0.60, overlay, 0.40, 0)
-    return Image.fromarray(blended)
-
+# =========================
+# Preview grid
+# =========================
 
 def save_grid(
     tiles: list[tuple[str, Image.Image]],
@@ -325,258 +654,8 @@ def save_grid(
 
     for i, (caption, tile) in enumerate(tiles):
         x = i * tile_size
-        tile = tile.convert("RGB").resize((tile_size, tile_size), Image.Resampling.LANCZOS)
+        tile = _to_rgb_pil(tile).resize((tile_size, tile_size), Image.Resampling.LANCZOS)
         canvas.paste(tile, (x, caption_h))
         draw.text((x + 6, 10), caption, fill=(0, 0, 0))
 
     canvas.save(output_path, quality=95)
-
-
-def quality_metadata(
-    original: Image.Image,
-    generated: Image.Image,
-    strict_mask: Image.Image,
-    quality_cfg: dict[str, Any],
-) -> dict[str, Any]:
-    stats = image_pixel_stats(generated)
-    diff_stats = compute_diff_stats(original, generated, strict_mask)
-
-    suspicious_black = is_suspicious_black_image(stats)
-
-    reasons = []
-
-    if quality_cfg.get("reject_black_images", True) and suspicious_black:
-        reasons.append("suspicious_black_image")
-
-    if diff_stats["background_region_mean_abs_diff"] < float(quality_cfg["min_background_diff"]):
-        reasons.append("background_diff_too_low")
-
-    if diff_stats["object_region_mean_abs_diff"] > float(quality_cfg["max_object_diff"]):
-        reasons.append("object_diff_too_high")
-
-    if diff_stats["mask_coverage"] > float(quality_cfg["max_mask_coverage"]):
-        reasons.append("mask_coverage_too_high")
-
-    return {
-        "suspicious_black_image": suspicious_black,
-        "accepted_by_auto_gate": len(reasons) == 0,
-        "rejection_reasons": reasons,
-        "output_pixel_stats": stats,
-        **diff_stats,
-    }
-
-
-def compute_ui_rectangle_score(image_bgr: np.ndarray) -> float:
-    """
-    Heuristic for HUD, inset images, picture-in-picture windows and screen overlays.
-
-    This catches rectangular regions even when they touch borders, which is common
-    for drone controller views or embedded camera feeds.
-    """
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 60, 150)
-
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    height, width = gray.shape[:2]
-    image_area = max(height * width, 1)
-
-    best_score = 0.0
-
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-
-        area_ratio = (w * h) / image_area
-
-        if area_ratio < 0.008 or area_ratio > 0.55:
-            continue
-
-        aspect = max(w / max(h, 1), h / max(w, 1))
-
-        if aspect > 10:
-            continue
-
-        rect_area = max(w * h, 1)
-        contour_area = cv2.contourArea(contour)
-        rectangularity = contour_area / rect_area
-
-        if rectangularity < 0.15:
-            continue
-
-        touches_border = (
-            x < 8
-            or y < 8
-            or x + w > width - 8
-            or y + h > height - 8
-        )
-
-        border_bonus = 1.8 if touches_border else 1.0
-
-        perimeter = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.03 * perimeter, True)
-
-        vertex_bonus = 1.3 if len(approx) <= 8 else 1.0
-
-        score = area_ratio * rectangularity * border_bonus * vertex_bonus
-        best_score = max(best_score, float(score))
-
-    return best_score
-
-
-def _local_maxima_indices(values: np.ndarray, threshold: float, min_distance: int, max_peaks: int) -> list[int]:
-    candidates = np.where(values >= threshold)[0].tolist()
-    candidates = sorted(candidates, key=lambda i: values[i], reverse=True)
-
-    selected = []
-
-    for idx in candidates:
-        if all(abs(idx - kept) >= min_distance for kept in selected):
-            selected.append(idx)
-
-        if len(selected) >= max_peaks:
-            break
-
-    return sorted(selected)
-
-
-def compute_inset_window_score(image_bgr: np.ndarray) -> float:
-    """
-    Detect picture-in-picture / embedded drone-camera views.
-
-    Unlike compute_internal_rectangle_score(), this does not require a closed contour.
-    It searches for strong horizontal/vertical border lines and measures whether
-    they form a plausible inset window.
-    """
-    height, width = image_bgr.shape[:2]
-
-    if height < 64 or width < 64:
-        return 0.0
-
-    target_width = 512
-
-    if width > target_width:
-        scale = target_width / width
-        resized = cv2.resize(
-            image_bgr,
-            (target_width, int(height * scale)),
-            interpolation=cv2.INTER_AREA,
-        )
-    else:
-        resized = image_bgr.copy()
-        scale = 1.0
-
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-
-    edges = cv2.Canny(gray, 60, 150)
-    edges01 = (edges > 0).astype(np.float32)
-
-    h, w = gray.shape[:2]
-
-    row_strength = edges01.mean(axis=1)
-    col_strength = edges01.mean(axis=0)
-
-    row_strength = cv2.blur(row_strength.reshape(-1, 1), (1, 9)).ravel()
-    col_strength = cv2.blur(col_strength.reshape(1, -1), (9, 1)).ravel()
-
-    row_threshold = max(float(np.percentile(row_strength, 97.5)), float(row_strength.mean() + 2.0 * row_strength.std()))
-    col_threshold = max(float(np.percentile(col_strength, 97.5)), float(col_strength.mean() + 2.0 * col_strength.std()))
-
-    row_peaks = _local_maxima_indices(
-        row_strength,
-        threshold=row_threshold,
-        min_distance=max(12, h // 25),
-        max_peaks=18,
-    )
-
-    col_peaks = _local_maxima_indices(
-        col_strength,
-        threshold=col_threshold,
-        min_distance=max(12, w // 25),
-        max_peaks=18,
-    )
-
-    if len(row_peaks) < 2 or len(col_peaks) < 2:
-        return 0.0
-
-    best_score = 0.0
-
-    image_area = h * w
-
-    for y1_i in range(len(row_peaks)):
-        for y2_i in range(y1_i + 1, len(row_peaks)):
-            y1 = row_peaks[y1_i]
-            y2 = row_peaks[y2_i]
-
-            rect_h = y2 - y1
-
-            if rect_h < h * 0.08 or rect_h > h * 0.75:
-                continue
-
-            for x1_i in range(len(col_peaks)):
-                for x2_i in range(x1_i + 1, len(col_peaks)):
-                    x1 = col_peaks[x1_i]
-                    x2 = col_peaks[x2_i]
-
-                    rect_w = x2 - x1
-
-                    if rect_w < w * 0.08 or rect_w > w * 0.75:
-                        continue
-
-                    area_ratio = (rect_w * rect_h) / max(image_area, 1)
-
-                    if area_ratio < 0.015 or area_ratio > 0.55:
-                        continue
-
-                    band = max(2, int(min(h, w) * 0.006))
-
-                    top = edges01[max(0, y1 - band):min(h, y1 + band + 1), x1:x2]
-                    bottom = edges01[max(0, y2 - band):min(h, y2 + band + 1), x1:x2]
-                    left = edges01[y1:y2, max(0, x1 - band):min(w, x1 + band + 1)]
-                    right = edges01[y1:y2, max(0, x2 - band):min(w, x2 + band + 1)]
-
-                    if top.size == 0 or bottom.size == 0 or left.size == 0 or right.size == 0:
-                        continue
-
-                    border_density = float(np.mean([top.mean(), bottom.mean(), left.mean(), right.mean()]))
-
-                    inside = gray[y1 + band:y2 - band, x1 + band:x2 - band]
-
-                    if inside.size == 0:
-                        continue
-
-                    outer_parts = []
-
-                    if y1 - 3 * band >= 0:
-                        outer_parts.append(gray[y1 - 3 * band:y1 - band, x1:x2])
-                    if y2 + 3 * band < h:
-                        outer_parts.append(gray[y2 + band:y2 + 3 * band, x1:x2])
-                    if x1 - 3 * band >= 0:
-                        outer_parts.append(gray[y1:y2, x1 - 3 * band:x1 - band])
-                    if x2 + 3 * band < w:
-                        outer_parts.append(gray[y1:y2, x2 + band:x2 + 3 * band])
-
-                    if outer_parts:
-                        outer_mean = float(np.mean([part.mean() for part in outer_parts if part.size > 0]))
-                        color_jump = abs(float(inside.mean()) - outer_mean) / 255.0
-                    else:
-                        color_jump = 0.0
-
-                    near_corner_or_bottom = (
-                        x1 < w * 0.12
-                        or x2 > w * 0.88
-                        or y2 > h * 0.78
-                        or y1 < h * 0.12
-                    )
-
-                    location_bonus = 1.35 if near_corner_or_bottom else 1.0
-
-                    score = location_bonus * (
-                        0.70 * border_density
-                        + 0.20 * color_jump
-                        + 0.10 * min(1.0, area_ratio * 6.0)
-                    )
-
-                    best_score = max(best_score, float(score))
-
-    return best_score

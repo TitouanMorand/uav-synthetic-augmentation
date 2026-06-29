@@ -1,28 +1,47 @@
-.venv/
-.venv-mps/
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Training and experiment outputs
-runs/
-wandb/
-*.pt
+# Virtual environments
+.venv/
+venv/
+.env
 
-# Local/generated datasets and previews
-data/previews/
-data/previews_check/
-data/previews_visualize/
-data/synthetic/
-data/yolo/data.yaml
-data/yolo/images/
-data/yolo/labels/
-data/yolo_augmented_smoke/
-data/yolo_aug_night/images/
-data/yolo_aug_night/labels/
-data/yolo_aug_night/previews/
-data/yolo_aug_night_balanced/images/
-data/yolo_aug_night_balanced/labels/
-reports/
-
-# System files
+# IDE / OS
+.vscode/
+.idea/
 .DS_Store
+
+# Local datasets
+data/raw/*
+data/interim/*
+data/augmented/*
+data/stress/*
+!data/raw/.gitkeep
+!data/interim/.gitkeep
+!data/augmented/.gitkeep
+!data/stress/.gitkeep
+
+# Training runs and model weights
+runs/*
+!runs/.gitkeep
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+
+# Generated artifacts
+artifacts/previews/*
+artifacts/reports/*
+artifacts/tables/*
+!artifacts/previews/.gitkeep
+!artifacts/reports/.gitkeep
+!artifacts/tables/.gitkeep
+
+# Logs
+*.log

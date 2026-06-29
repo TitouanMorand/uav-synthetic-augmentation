@@ -1,23 +1,58 @@
-from typing import Tuple, List
+from __future__ import annotations
 
-def coco_to_yolo(bbox: List[float], img_w: int, img_h: int) -> Tuple[float, float, float, float]:
-    """
-    Convert COCO bbox [x, y, width, height] (absolute pixels) to YOLO normalized
-    [x_center, y_center, width, height] where values are relative to image size.
-    """
-    x, y, w, h = bbox
-    x_c = x + w / 2.0
-    y_c = y + h / 2.0
-    return x_c / img_w, y_c / img_h, w / img_w, h / img_h
+import hashlib
+import json
+import random
+from pathlib import Path
+from typing import Any
 
-def yolo_to_pixel_coords(xc: float, yc: float, w: float, h: float, img_w: int, img_h: int):
-    """Convert normalized YOLO box to pixel coords: (x1,y1,x2,y2)"""
-    x_c = xc * img_w
-    y_c = yc * img_h
-    bw = w * img_w
-    bh = h * img_h
-    x1 = int(round(x_c - bw / 2.0))
-    y1 = int(round(y_c - bh / 2.0))
-    x2 = int(round(x_c + bw / 2.0))
-    y2 = int(round(y_c + bh / 2.0))
-    return x1, y1, x2, y2
+import numpy as np
+import torch
+
+
+def ensure_dir(path: str | Path) -> Path:
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def save_json(data: dict[str, Any], path: str | Path) -> Path:
+    path = Path(path)
+    ensure_dir(path.parent)
+
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+    return path
+
+
+def set_seed(seed: int = 42) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def resolve_device(device: str = "auto") -> str:
+    if device != "auto":
+        return device
+
+    if torch.cuda.is_available():
+        return "cuda"
+
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+
+    return "cpu"
+
+
+def sha256_file(path: str | Path) -> str:
+    h = hashlib.sha256()
+
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+
+    return h.hexdigest()

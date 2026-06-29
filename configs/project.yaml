@@ -1,0 +1,63 @@
+project:
+  name: uav-synthetic-augmentation
+  title: Object-Preserving Synthetic Data Augmentation for Tiny Drone Detection
+dataset:
+  hf_name: pathikg/drone-detection-dataset
+  class_name: drone
+  class_id: 0
+  output_root: data/interim/yolo_drone_hf_300
+  split:
+    train: 300
+    val: 80
+    test: 80
+yolo:
+  model: yolov8n.pt
+  image_size: 640
+  batch: 4
+  workers: 2
+  epochs_baseline: 15
+  epochs_augmented: 15
+  patience: 5
+  device: auto
+  seed: 42
+augmentation:
+  classic_per_image: 2
+  synthetic_per_image: 2
+  object_padding_px: 8
+experiments:
+  baseline:
+    name: baseline_real_only_hf_drone_300
+    dataset_root: data/interim/yolo_drone_hf_300
+  classic:
+    name: real_plus_classic_hf_drone_300
+    dataset_root: data/augmented/yolo_drone_classic_300
+  object_preserving:
+    name: real_plus_object_preserving_v1_hf_drone_300
+    dataset_root: data/augmented/yolo_drone_object_preserving_v1_300
+  diffusion:
+    name: real_plus_diffusion_reinsert_night_hf_drone_300
+    dataset_root: data/augmented/yolo_drone_diffusion_reinsert_night_300
+paths:
+  previews: artifacts/previews
+  reports: artifacts/reports
+  tables: artifacts/tables
+  runs: runs
+diffusion:
+  img2img_model: runwayml/stable-diffusion-v1-5
+  inpaint_model: runwayml/stable-diffusion-inpainting
+  output_root: data/augmented/yolo_drone_diffusion_grid_300
+  max_images: 4
+  global_strength: 0.75
+  global_guidance_scale: 8.0
+  global_steps: 30
+  inpaint_strength: 1.0
+  inpaint_guidance_scale: 10.0
+  inpaint_steps: 40
+  box_margin_px: 48
+  box_margin_ratio: 3.0
+  prompt: realistic night-time aerial surveillance image, dark blue night sky, low-light
+    conditions, moonlight, subtle atmospheric haze, reduced visibility, sensor noise,
+    photorealistic, same camera viewpoint, same scene geometry, no new objects
+  negative_prompt: daytime, bright blue sky, sunny, black image, blank image, empty
+    image, missing drone, extra drone, duplicated drone, deformed drone, changed object
+    position, airplane, text, watermark, cartoon, painting, unrealistic, low quality

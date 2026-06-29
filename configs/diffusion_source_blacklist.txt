@@ -1,0 +1,5 @@
+# One source_index per line.
+# Use this to exclude remaining bad diffusion sources after visual inspection.
+# Example:
+# 47
+# 121

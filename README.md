@@ -1,37 +1,57 @@
 # UAV Synthetic Augmentation
 
-Clean Python-first project for object-preserving synthetic data augmentation applied to tiny drone detection in aerial imagery.
+Object-preserving synthetic data augmentation pipeline for tiny drone detection in aerial imagery.
 
-## Goal
+This project studies whether controlled augmentation can improve YOLO drone detection under challenging visual conditions, especially low-light and night-like settings, while preserving small critical objects and their bounding-box labels.
 
-The goal is to build a simple and reproducible pipeline to evaluate whether data augmentation improves tiny drone detection.
+## Motivation
 
-The project compares:
+Generic image augmentation can easily break object detection datasets when the object is small. For drone detection, the main risk is to generate visually plausible images while corrupting the tiny drone, hallucinating extra drones, or creating object-context inconsistencies.
 
-1. a YOLO baseline trained on real drone images only;
-2. YOLO trained with classic augmentations;
-3. YOLO trained with object-preserving synthetic augmentations.
+The project therefore focuses on a data-centric question:
+
+> Can we transform the image context while preserving the drone object and keeping YOLO labels valid?
 
 ## Dataset
 
 Active dataset:
 
 - Hugging Face dataset: `pathikg/drone-detection-dataset`
-- Source annotation style: COCO-style bounding boxes `[x, y, width, height]`
-- Target annotation style: YOLO
+- Source annotation format: COCO-style bounding boxes `[x, y, width, height]`
+- Target format: YOLO normalized labels
 - Class: `drone`
+- Working split used in this project: `300 train / 80 val / 80 test`
 
-## Pipeline
+No generated datasets, trained weights, or local run outputs are versioned in Git.
 
-Run the project step by step:
+## What the pipeline compares
 
-```bash
-python scripts/00_check_env.py
-python scripts/01_prepare_dataset.py
-python scripts/02_preview_dataset.py
-python scripts/03_train_baseline.py
-python scripts/04_make_augmentations.py
-python scripts/05_train_augmented.py
-python scripts/06_compare_experiments.py
-python scripts/07_error_analysis.py
-python scripts/08_make_report.py
+The project compares:
+
+1. **Real-only baseline**
+   - YOLO trained on the real HF drone subset.
+
+2. **Classical augmentation**
+   - Standard image-space augmentations with YOLO boxes transformed accordingly.
+
+3. **Object-preserving augmentation**
+   - Context changes while preserving the drone label and object region.
+
+4. **Diffusion-based night augmentation**
+   - Pretrained diffusion only, no diffusion model training.
+   - Source filtering to remove contaminated images.
+   - Controlled night context generation.
+   - Object matte extraction.
+   - Local LAB delta transfer on the drone.
+   - Hard reinsertion to preserve object geometry and labels.
+
+## Repository structure
+
+```text
+configs/      Experiment and diffusion configuration files
+src/          Reusable Python modules
+scripts/      Step-by-step executable pipeline scripts
+docs/         Project report and selected visual examples
+data/         Local datasets, ignored by Git except .gitkeep files
+artifacts/    Local generated reports, tables and previews, ignored by Git except .gitkeep files
+runs/         YOLO training outputs, ignored by Git except .gitkeep

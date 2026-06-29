@@ -9,44 +9,39 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+.env
 
-# IDE
+# IDE / OS
 .vscode/
 .idea/
+.DS_Store
 
-# Local data
+# Local datasets
 data/raw/*
 data/interim/*
 data/augmented/*
-
+data/stress/*
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/augmented/.gitkeep
+!data/stress/.gitkeep
 
-# YOLO / training runs
+# Training runs and model weights
 runs/*
 !runs/.gitkeep
-
-# Generated artifacts
-artifacts/previews/*
-artifacts/reports/*
-artifacts/tables/*
-
-!artifacts/previews/.gitkeep
-!artifacts/reports/.gitkeep
-!artifacts/tables/.gitkeep
-
-# Model files
 *.pt
 *.pth
 *.onnx
 *.engine
 *.weights
 
-# Logs and system files
-*.log
-.DS_Store
+# Generated artifacts
+artifacts/previews/*
+artifacts/reports/*
+artifacts/tables/*
+!artifacts/previews/.gitkeep
+!artifacts/reports/.gitkeep
+!artifacts/tables/.gitkeep
 
-# Stress-test datasets
-data/stress/*
-!data/stress/.gitkeep
+# Logs
+*.log

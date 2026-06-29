@@ -48,11 +48,28 @@ def experiment_map(config: dict) -> dict[str, str]:
         "real_plus_object_preserving": config["experiments"]["object_preserving"]["name"],
     }
 
-    diffusion_name = config.get("experiments", {}).get("diffusion", {}).get("name")
-    if diffusion_name:
-        candidate = Path("runs/detect") / diffusion_name / "weights" / "best.pt"
-        if candidate.exists():
-            experiments["real_plus_diffusion"] = diffusion_name
+    # Automatically include diffusion ablation runs if their weights exist.
+    diffusion_weight_paths = sorted(
+        Path("runs/detect").glob(
+            "real_plus_diffusion_reinsert_night_n*_hf_drone_300/weights/best.pt"
+        )
+    )
+
+    for weights_path in diffusion_weight_paths:
+        run_name = weights_path.parents[1].name
+
+        # Example:
+        # real_plus_diffusion_reinsert_night_n075_hf_drone_300
+        marker = "night_"
+        suffix = "_hf_drone_300"
+
+        if marker in run_name and suffix in run_name:
+            n_tag = run_name.split(marker, 1)[1].split(suffix, 1)[0]
+            experiment_name = f"real_plus_diffusion_{n_tag}"
+        else:
+            experiment_name = run_name
+
+        experiments[experiment_name] = run_name
 
     return experiments
 

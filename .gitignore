@@ -46,3 +46,7 @@ artifacts/tables/*
 # Logs and system files
 *.log
 .DS_Store
+
+# Stress-test datasets
+data/stress/*
+!data/stress/.gitkeep

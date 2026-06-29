@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
 import pandas as pd
 import yaml
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -17,21 +18,23 @@ from src.augment import read_yolo_labels
 from src.config import load_config
 from src.diffusion import DiffusionBackend
 from src.diffusion_v2 import (
+    apply_lab_delta_to_object,
     composite_with_alpha,
     draw_boxes,
-    labels_box_stats,
+    erode_mask,
     make_feather_alpha,
     make_night_condition,
     make_object_matte,
     overlay_mask,
     preview_alpha,
     quality_metadata,
-    relight_object_to_context,
-    save_grid,
 )
 from src.utils import ensure_dir, resolve_device
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def run_img2img_backend(
     backend,
     image,
@@ -82,18 +85,8 @@ def run_img2img_backend(
     )
 
 
-def adaptive_feather_px(max_box_side_px: float, preset_cap: int) -> int:
-    """
-    Tiny drones should not get huge feather radii.
-    """
-    value = int(round(max_box_side_px * 0.15))
-    value = max(2, value)
-    value = min(value, preset_cap)
-    return value
-
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate V2.2 diffusion hyperparameter grid.")
+    parser = argparse.ArgumentParser(description="Generate readable V2.2 diffusion LAB-delta grids.")
     parser.add_argument("--max-images", type=int, default=8)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--presets", nargs="+", default=["conservative", "medium"])
@@ -101,6 +94,95 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def yolo_to_xyxy(label, width, height):
+    cls_id, x_c, y_c, w, h = label
+    x1 = int((x_c - w / 2) * width)
+    y1 = int((y_c - h / 2) * height)
+    x2 = int((x_c + w / 2) * width)
+    y2 = int((y_c + h / 2) * height)
+    return max(0, x1), max(0, y1), min(width - 1, x2), min(height - 1, y2)
+
+
+def crop_around_box(image: Image.Image, label, pad_factor: float = 8.0, min_size: int = 160) -> Image.Image:
+    w, h = image.size
+    x1, y1, x2, y2 = yolo_to_xyxy(label, w, h)
+
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    side = int(max(min_size, max(bw, bh) * pad_factor))
+
+    cx = (x1 + x2) // 2
+    cy = (y1 + y2) // 2
+
+    left = max(0, cx - side // 2)
+    top = max(0, cy - side // 2)
+    right = min(w, left + side)
+    bottom = min(h, top + side)
+
+    # readjust if clipped
+    left = max(0, right - side)
+    top = max(0, bottom - side)
+
+    crop = image.crop((left, top, right, bottom))
+    return crop
+
+
+def annotate_tile(image: Image.Image, title: str, tile_size=(260, 260), title_h: int = 28) -> Image.Image:
+    img = image.copy().convert("RGB")
+    img.thumbnail(tile_size, Image.Resampling.LANCZOS)
+
+    canvas = Image.new("RGB", (tile_size[0], tile_size[1] + title_h), "white")
+    x = (tile_size[0] - img.width) // 2
+    y = title_h + (tile_size[1] - img.height) // 2
+    canvas.paste(img, (x, y))
+
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle([0, 0, tile_size[0], title_h], fill=(240, 240, 240))
+    draw.text((6, 6), title, fill="black")
+    return canvas
+
+
+def make_grid(rows, output_path: Path, tile_size=(260, 260), title_h: int = 28, row_gap: int = 10, col_gap: int = 10):
+    prepared_rows = []
+    max_cols = max(len(row) for row in rows)
+
+    for row in rows:
+        prepared = [annotate_tile(img, title, tile_size=tile_size, title_h=title_h) for title, img in row]
+        prepared_rows.append(prepared)
+
+    cell_w = tile_size[0]
+    cell_h = tile_size[1] + title_h
+
+    grid_w = max_cols * cell_w + (max_cols - 1) * col_gap
+    grid_h = len(prepared_rows) * cell_h + (len(prepared_rows) - 1) * row_gap
+
+    canvas = Image.new("RGB", (grid_w, grid_h), "white")
+
+    for r, row in enumerate(prepared_rows):
+        for c, tile in enumerate(row):
+            x = c * (cell_w + col_gap)
+            y = r * (cell_h + row_gap)
+            canvas.paste(tile, (x, y))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path, quality=95)
+
+
+def first_label(labels):
+    return labels[0]
+
+
+def build_zoom_row(row):
+    zoom_row = []
+    for title, img, label in row:
+        crop = crop_around_box(img, label, pad_factor=10.0, min_size=180)
+        zoom_row.append((title, crop))
+    return zoom_row
+
+
+# -----------------------------
+# Main
+# -----------------------------
 def main() -> None:
     args = parse_args()
 
@@ -108,7 +190,6 @@ def main() -> None:
     v2_cfg = yaml.safe_load(Path("configs/diffusion_v2.yaml").read_text())["diffusion_v2"]
 
     accepted_sources_path = Path(project_cfg["paths"]["tables"]) / "diffusion_v2_source_accepted.csv"
-
     if not accepted_sources_path.exists():
         raise FileNotFoundError(
             f"Missing accepted source file: {accepted_sources_path}. "
@@ -137,10 +218,11 @@ def main() -> None:
 
     prompt = v2_cfg["prompt"]["positive"]
     negative_prompt = v2_cfg["prompt"]["negative"]
+    lab_cfg = v2_cfg["lab_delta"]
 
     rows = []
 
-    for _, row in tqdm(list(sources.iterrows()), desc="V2.2 diffusion grid"):
+    for _, row in tqdm(list(sources.iterrows()), desc="V2.2 diffusion LAB delta grid"):
         image_path = Path(row["image_path"])
         label_path = Path(row["label_path"])
 
@@ -148,20 +230,30 @@ def main() -> None:
         if not labels:
             continue
 
+        label0 = first_label(labels)
         original = Image.open(image_path).convert("RGB")
+
         object_matte = make_object_matte(original, labels)
         object_overlay = overlay_mask(original, object_matte, (255, 50, 50))
 
-        box_stats = labels_box_stats(labels, image_size=original.size)
-        max_box_side = float(box_stats["max_box_side_px"])
+        paste_mask = erode_mask(object_matte, erode_px=int(lab_cfg["mask_erode_px"]))
+        hard_alpha = make_feather_alpha(paste_mask, feather_px=0)
+        micro_alpha = make_feather_alpha(paste_mask, feather_px=int(lab_cfg["micro_feather_px"]))
 
-        base_tiles = [
+        top_row_full = [
             ("original", original),
             ("original + box", draw_boxes(original.copy(), labels)),
             ("object matte", object_overlay),
         ]
 
-        preset_tiles = []
+        top_row_zoom = build_zoom_row([
+            ("original", original, label0),
+            ("original + box", draw_boxes(original.copy(), labels), label0),
+            ("object matte", object_overlay, label0),
+        ])
+
+        full_rows = [top_row_full]
+        zoom_rows = [top_row_zoom]
 
         for preset_name in args.presets:
             preset = v2_cfg["presets"][preset_name]
@@ -184,47 +276,46 @@ def main() -> None:
                 seed=seed,
             )
 
-            feather_px = adaptive_feather_px(
-                max_box_side_px=max_box_side,
-                preset_cap=int(preset["feather_px"]),
+            lab_delta_object = apply_lab_delta_to_object(
+                original=original,
+                generated_context=generated_context,
+                object_mask=paste_mask,
+                ring_inner_px=int(lab_cfg["ring_inner_px"]),
+                ring_outer_px=int(lab_cfg["ring_outer_px"]),
+                luminance_strength=float(lab_cfg["luminance_strength"]),
+                contrast_strength=float(lab_cfg["contrast_strength"]),
+                chroma_strength=float(lab_cfg["chroma_strength"]),
+                night_blue_bias=float(lab_cfg["night_blue_bias"]),
+                max_l_shift=float(lab_cfg["max_l_shift"]),
+                max_ab_shift=float(lab_cfg["max_ab_shift"]),
+                min_l_scale=float(lab_cfg["min_l_scale"]),
+                max_l_scale=float(lab_cfg["max_l_scale"]),
             )
 
-            hard_alpha = make_feather_alpha(object_matte, feather_px=0)
-            feather_alpha = make_feather_alpha(object_matte, feather_px=feather_px)
-
-            hard_reinsert = composite_with_alpha(
+            hard_original = composite_with_alpha(
                 background=generated_context,
                 foreground=original,
                 alpha_mask=hard_alpha,
             )
 
-            feather_reinsert = composite_with_alpha(
+            hard_lab_delta = composite_with_alpha(
                 background=generated_context,
-                foreground=original,
-                alpha_mask=feather_alpha,
+                foreground=lab_delta_object,
+                alpha_mask=hard_alpha,
             )
 
-            relit_object = relight_object_to_context(
-                original=original,
-                generated_context=generated_context,
-                object_mask=object_matte,
-                ring_inner_px=int(preset["ring_inner_px"]),
-                ring_outer_px=int(preset["ring_outer_px"]),
-                relight_strength=float(preset.get("relight_strength", 0.25)),
-            )
-
-            relight_feather_reinsert = composite_with_alpha(
+            microfeather_lab_delta = composite_with_alpha(
                 background=generated_context,
-                foreground=relit_object,
-                alpha_mask=feather_alpha,
+                foreground=lab_delta_object,
+                alpha_mask=micro_alpha,
             )
 
             base_stem = f"v2_{preset_name}_{int(row['source_index']):04d}_{image_path.stem}"
 
             variants = [
-                ("hard_reinsert", hard_reinsert, hard_alpha),
-                ("feather_reinsert", feather_reinsert, feather_alpha),
-                ("relight_feather_reinsert", relight_feather_reinsert, feather_alpha),
+                ("hard_original", hard_original, hard_alpha),
+                ("hard_lab_delta", hard_lab_delta, hard_alpha),
+                ("microfeather_lab_delta", microfeather_lab_delta, micro_alpha),
             ]
 
             for mode_name, mode_image, mode_alpha in variants:
@@ -240,7 +331,7 @@ def main() -> None:
                     original=original,
                     generated_context=generated_context,
                     composite=mode_image,
-                    object_mask=object_matte,
+                    object_mask=paste_mask,
                     alpha_mask=mode_alpha,
                     quality_cfg=v2_cfg["quality_gate"],
                 )
@@ -255,7 +346,7 @@ def main() -> None:
                     "seed": seed,
                     "prompt": prompt,
                     "negative_prompt": negative_prompt,
-                    "adaptive_feather_px": feather_px,
+                    **lab_cfg,
                     **preset,
                     **meta,
                 }
@@ -263,25 +354,33 @@ def main() -> None:
                 out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                 rows.append(payload)
 
-            preset_tiles.extend(
-                [
-                    (f"{preset_name} condition", condition),
-                    (f"{preset_name} alpha", preview_alpha(feather_alpha)),
-                    (f"{preset_name} hard", draw_boxes(hard_reinsert.copy(), labels)),
-                    (f"{preset_name} feather", draw_boxes(feather_reinsert.copy(), labels)),
-                    (f"{preset_name} relight", draw_boxes(relight_feather_reinsert.copy(), labels)),
-                ]
-            )
+            row_full = [
+                (f"{preset_name} condition", condition),
+                (f"{preset_name} paste mask", preview_alpha(hard_alpha)),
+                (f"{preset_name} delta object", draw_boxes(lab_delta_object.copy(), labels)),
+                (f"{preset_name} hard original", draw_boxes(hard_original.copy(), labels)),
+                (f"{preset_name} hard lab delta", draw_boxes(hard_lab_delta.copy(), labels)),
+                (f"{preset_name} microfeather", draw_boxes(microfeather_lab_delta.copy(), labels)),
+            ]
+            full_rows.append(row_full)
 
-        grid_path = previews_dir / f"v2_grid_{int(row['source_index']):04d}_{image_path.stem}.jpg"
-        save_grid(
-            tiles=[*base_tiles, *preset_tiles],
-            output_path=grid_path,
-            tile_size=220,
-        )
+            row_zoom = build_zoom_row([
+                (f"{preset_name} condition", condition, label0),
+                (f"{preset_name} paste mask", preview_alpha(hard_alpha), label0),
+                (f"{preset_name} delta object", draw_boxes(lab_delta_object.copy(), labels), label0),
+                (f"{preset_name} hard original", draw_boxes(hard_original.copy(), labels), label0),
+                (f"{preset_name} hard lab delta", draw_boxes(hard_lab_delta.copy(), labels), label0),
+                (f"{preset_name} microfeather", draw_boxes(microfeather_lab_delta.copy(), labels), label0),
+            ])
+            zoom_rows.append(row_zoom)
+
+        grid_path_full = previews_dir / f"v2_grid_full_{int(row['source_index']):04d}_{image_path.stem}.jpg"
+        grid_path_zoom = previews_dir / f"v2_grid_zoom_{int(row['source_index']):04d}_{image_path.stem}.jpg"
+
+        make_grid(full_rows, grid_path_full, tile_size=(260, 220), title_h=28, row_gap=14, col_gap=10)
+        make_grid(zoom_rows, grid_path_zoom, tile_size=(260, 220), title_h=28, row_gap=14, col_gap=10)
 
     df = pd.DataFrame(rows)
-
     results_path = tables_dir / "diffusion_v2_grid_results.csv"
     df.to_csv(results_path, index=False)
 
@@ -295,7 +394,6 @@ def main() -> None:
             mean_object_diff=("object_region_mean_abs_diff", "mean"),
             mean_context_diff=("context_region_mean_abs_diff", "mean"),
             mean_halo_score=("halo_score", "mean"),
-            mean_adaptive_feather_px=("adaptive_feather_px", "mean"),
         )
         .reset_index()
     )
@@ -303,7 +401,7 @@ def main() -> None:
     summary_path = tables_dir / "diffusion_v2_grid_summary.csv"
     summary.to_csv(summary_path, index=False)
 
-    print("\nV2.2 diffusion grid completed.")
+    print("\\nV2.2 diffusion LAB delta grid completed.")
     print(f"Results: {results_path}")
     print(f"Summary: {summary_path}")
     print(f"Preview dir: {previews_dir}")

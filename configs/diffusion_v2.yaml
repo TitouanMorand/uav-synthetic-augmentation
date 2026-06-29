@@ -40,3 +40,16 @@ diffusion_v2:
     max_object_diff: 95.0
     max_halo_score: 50.0
     reject_black_images: true
+  lab_delta:
+    ring_inner_px: 3
+    ring_outer_px: 12
+    luminance_strength: 1.1
+    contrast_strength: 0.45
+    chroma_strength: 0.35
+    night_blue_bias: -6.0
+    max_l_shift: 38.0
+    max_ab_shift: 10.0
+    min_l_scale: 0.92
+    max_l_scale: 1.1
+    mask_erode_px: 1
+    micro_feather_px: 2

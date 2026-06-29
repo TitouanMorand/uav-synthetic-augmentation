@@ -477,19 +477,49 @@ def make_night_condition(image: Image.Image, darkness: float = 0.85) -> Image.Im
 
 
 
-def relight_object_to_context(
+
+def erode_mask(mask: Image.Image, erode_px: int = 1) -> Image.Image:
+    mask_arr = (np.array(mask.convert("L")) > 0).astype(np.uint8) * 255
+
+    if erode_px <= 0:
+        return Image.fromarray(mask_arr, mode="L")
+
+    k = 2 * erode_px + 1
+    kernel = np.ones((k, k), np.uint8)
+    eroded = cv2.erode(mask_arr, kernel, iterations=1)
+    return Image.fromarray(eroded, mode="L")
+
+
+def apply_lab_delta_to_object(
     original: Image.Image,
     generated_context: Image.Image,
     object_mask: Image.Image,
-    ring_inner_px: int = 4,
-    ring_outer_px: int = 18,
-    relight_strength: float = 0.25,
+    ring_inner_px: int = 3,
+    ring_outer_px: int = 12,
+    luminance_strength: float = 0.85,
+    contrast_strength: float = 0.30,
+    chroma_strength: float = 0.22,
+    night_blue_bias: float = -4.0,
+    max_l_shift: float = 30.0,
+    max_ab_shift: float = 7.0,
+    min_l_scale: float = 0.92,
+    max_l_scale: float = 1.10,
 ) -> Image.Image:
     """
-    Conservative relighting:
-    - mainly adapts luminance (L channel),
-    - only very small color correction,
-    - blends back with the original object to avoid over-darkening.
+    Compute a local LAB delta between the ring around the object in:
+    - the original image,
+    - the generated context,
+    then apply that delta only to the object.
+
+    L channel:
+      - luminance shift
+      - mild contrast scale
+
+    A/B channels:
+      - small color shifts
+
+    B channel additionally receives a small negative bias to push the object
+    slightly toward blue for a night look (OpenCV LAB: lower B -> bluer).
     """
     original_rgb = np.array(_to_rgb_pil(original)).astype(np.uint8)
     context_rgb = np.array(_to_rgb_pil(generated_context)).astype(np.uint8)
@@ -498,14 +528,16 @@ def relight_object_to_context(
     if mask.sum() == 0:
         return _to_rgb_pil(original)
 
-    kernel_inner = np.ones((max(1, ring_inner_px), max(1, ring_inner_px)), np.uint8)
-    kernel_outer = np.ones((max(1, ring_outer_px), max(1, ring_outer_px)), np.uint8)
+    k_inner = 2 * ring_inner_px + 1
+    k_outer = 2 * ring_outer_px + 1
+    kernel_inner = np.ones((k_inner, k_inner), np.uint8)
+    kernel_outer = np.ones((k_outer, k_outer), np.uint8)
 
     dilated_inner = cv2.dilate(mask, kernel_inner, iterations=1)
     dilated_outer = cv2.dilate(mask, kernel_outer, iterations=1)
 
     ring = (dilated_outer > 0) & (dilated_inner == 0)
-    obj_mask = mask > 0
+    obj = mask > 0
 
     if not ring.any():
         return _to_rgb_pil(original)
@@ -513,45 +545,61 @@ def relight_object_to_context(
     orig_lab = cv2.cvtColor(original_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     ctx_lab = cv2.cvtColor(context_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
 
-    relit_lab = orig_lab.copy()
-
     orig_ring_mean = orig_lab[ring].mean(axis=0)
-    orig_ring_std = orig_lab[ring].std(axis=0) + 1e-6
     ctx_ring_mean = ctx_lab[ring].mean(axis=0)
+
+    orig_ring_std = orig_lab[ring].std(axis=0) + 1e-6
     ctx_ring_std = ctx_lab[ring].std(axis=0) + 1e-6
 
-    # --- L channel: conservative partial adaptation
-    L = relit_lab[..., 0]
-    L_obj = L[obj_mask].copy()
+    transferred = orig_lab.copy()
 
-    scale_L = np.clip(ctx_ring_std[0] / orig_ring_std[0], 0.90, 1.08)
-    target_L = (L_obj - orig_ring_mean[0]) * scale_L + ctx_ring_mean[0]
+    # ----- L channel: shift + mild contrast scaling
+    L = transferred[..., 0]
+    obj_L = L[obj].copy()
 
-    # Partial move only, to avoid over-darkening.
-    L_obj = (1.0 - relight_strength) * L_obj + relight_strength * target_L
-    L[obj_mask] = np.clip(L_obj, 0, 255)
-
-    # --- A/B channels: only tiny mean shifts
-    for ch, max_shift in [(1, 4.0), (2, 6.0)]:
-        C = relit_lab[..., ch]
-        C_obj = C[obj_mask].copy()
-
-        shift = float(np.clip(ctx_ring_mean[ch] - orig_ring_mean[ch], -max_shift, max_shift))
-        C_obj = C_obj + relight_strength * shift
-        C[obj_mask] = np.clip(C_obj, 0, 255)
-
-    relit_rgb_full = cv2.cvtColor(relit_lab.astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32)
-
-    # Final safety blend with the original object.
-    blended = original_rgb.astype(np.float32).copy()
-    for c in range(3):
-        blended[..., c][obj_mask] = (
-            (1.0 - relight_strength) * original_rgb[..., c][obj_mask].astype(np.float32)
-            + relight_strength * relit_rgb_full[..., c][obj_mask]
+    raw_scale = float(ctx_ring_std[0] / orig_ring_std[0])
+    safe_scale = float(
+        np.clip(
+            1.0 + contrast_strength * (raw_scale - 1.0),
+            min_l_scale,
+            max_l_scale,
         )
+    )
 
-    blended = np.clip(blended, 0, 255).astype(np.uint8)
-    return Image.fromarray(blended, mode="RGB")
+    raw_shift = float(ctx_ring_mean[0] - orig_ring_mean[0])
+    safe_shift = float(np.clip(luminance_strength * raw_shift, -max_l_shift, max_l_shift))
+
+    obj_L = ((obj_L - orig_ring_mean[0]) * safe_scale) + orig_ring_mean[0] + safe_shift
+    L[obj] = np.clip(obj_L, 0, 255)
+
+    # ----- A channel: small color shift
+    A = transferred[..., 1]
+    obj_A = A[obj].copy()
+    a_shift = float(
+        np.clip(
+            chroma_strength * (ctx_ring_mean[1] - orig_ring_mean[1]),
+            -max_ab_shift,
+            max_ab_shift,
+        )
+    )
+    obj_A = obj_A + a_shift
+    A[obj] = np.clip(obj_A, 0, 255)
+
+    # ----- B channel: small color shift + explicit night blue bias
+    B = transferred[..., 2]
+    obj_B = B[obj].copy()
+    b_shift = float(
+        np.clip(
+            chroma_strength * (ctx_ring_mean[2] - orig_ring_mean[2]) + night_blue_bias,
+            -max_ab_shift,
+            max_ab_shift,
+        )
+    )
+    obj_B = obj_B + b_shift
+    B[obj] = np.clip(obj_B, 0, 255)
+
+    transferred_rgb = cv2.cvtColor(transferred.astype(np.uint8), cv2.COLOR_LAB2RGB)
+    return Image.fromarray(transferred_rgb, mode="RGB")
 
 
 # =========================

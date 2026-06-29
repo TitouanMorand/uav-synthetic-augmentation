@@ -1,0 +1,61 @@
+diffusion_v2:
+  inpaint_model: runwayml/stable-diffusion-inpainting
+
+  source_filter:
+    max_mask_coverage: 0.18
+    max_internal_rectangle_score: 0.22
+    max_vertical_seam_score: 32.0
+    min_box_max_side_px: 6
+    max_box_max_side_px: 180
+
+  prompt:
+    positive: >
+      same outdoor drone image transformed to realistic night conditions,
+      same camera viewpoint, same scene layout, same ground geometry,
+      low-light natural scene, dark blue illumination, weak moonlight,
+      subtle sensor noise, reduced visibility, photorealistic,
+      no new objects, no interface, no inset image, no split screen
+
+    negative: >
+      city skyline, satellite map, aerial city lights, star field, mars landscape,
+      space, planet, moon surface, surveillance interface, HUD, screen overlay,
+      picture-in-picture, inset image, split screen, frame, border, text, watermark,
+      extra drone, duplicated drone, airplane, bird, object hallucination,
+      cartoon, CGI, surreal, unrealistic, low quality, distorted object
+
+  presets:
+    conservative:
+      strength: 0.45
+      guidance_scale: 5.5
+      steps: 25
+      strict_object_margin_px: 8
+      protection_margin_px: 18
+      blend_margin_px: 28
+      mask_blur_px: 13
+      condition_strength: 0.65
+
+    medium:
+      strength: 0.60
+      guidance_scale: 7.0
+      steps: 30
+      strict_object_margin_px: 10
+      protection_margin_px: 24
+      blend_margin_px: 36
+      mask_blur_px: 17
+      condition_strength: 0.75
+
+    strong:
+      strength: 0.72
+      guidance_scale: 8.0
+      steps: 35
+      strict_object_margin_px: 12
+      protection_margin_px: 32
+      blend_margin_px: 48
+      mask_blur_px: 21
+      condition_strength: 0.85
+
+  quality_gate:
+    min_background_diff: 6.0
+    max_object_diff: 18.0
+    max_mask_coverage: 0.22
+    reject_black_images: true

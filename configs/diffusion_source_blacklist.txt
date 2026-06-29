@@ -1,0 +1,5 @@
+# One source_index per line.
+# Use this file to manually exclude remaining HUD / inset / picture-in-picture images.
+# Example:
+# 12
+# 47

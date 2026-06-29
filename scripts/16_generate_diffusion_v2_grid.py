@@ -101,27 +101,40 @@ def main() -> None:
         for preset_name in args.presets:
             preset = v2_cfg["presets"][preset_name]
 
+            # Very tight mask used only for the conditioning image.
+            # This avoids preserving a large daytime rectangle around the drone.
+            condition_mask = make_box_mask(
+                labels=labels,
+                image_size=original.size,
+                margin_px=int(preset.get("condition_margin_px", 2)),
+                relative_margin=0.3,
+                blur_px=2,
+            )
+
+            # Strict object mask used for quality metrics and object preservation.
             strict_mask = make_box_mask(
                 labels=labels,
                 image_size=original.size,
                 margin_px=int(preset["strict_object_margin_px"]),
-                relative_margin=0.8,
+                relative_margin=0.5,
                 blur_px=0,
             )
 
+            # Inpainting protection mask. Smaller than before to avoid large rectangular halos.
             protection_mask = make_box_mask(
                 labels=labels,
                 image_size=original.size,
                 margin_px=int(preset["protection_margin_px"]),
-                relative_margin=1.5,
-                blur_px=int(preset["mask_blur_px"]),
+                relative_margin=0.8,
+                blur_px=0,
             )
 
+            # Soft blending mask used after generation.
             blend_mask = make_box_mask(
                 labels=labels,
                 image_size=original.size,
                 margin_px=int(preset["blend_margin_px"]),
-                relative_margin=2.0,
+                relative_margin=1.2,
                 blur_px=int(preset["mask_blur_px"]),
             )
 
@@ -129,7 +142,7 @@ def main() -> None:
 
             condition = make_night_condition(
                 original=original,
-                protection_mask=protection_mask,
+                protection_mask=condition_mask,
                 condition_strength=float(preset["condition_strength"]),
                 variant_index=int(row["source_index"]),
             )

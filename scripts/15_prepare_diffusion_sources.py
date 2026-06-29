@@ -17,14 +17,23 @@ from src.augment import read_yolo_labels
 from src.config import load_config
 from src.diffusion_v2 import (
     compute_internal_rectangle_score,
+    compute_inset_window_score,
     compute_mask_coverage,
+    compute_ui_rectangle_score,
     compute_vertical_seam_score,
     labels_box_stats,
 )
 from src.utils import ensure_dir
 
 
-def draw_preview(image_path: Path, labels, output_path: Path, accepted: bool, reasons: list[str]) -> None:
+def draw_preview(
+    image_path: Path,
+    labels,
+    output_path: Path,
+    accepted: bool,
+    reasons: list[str],
+    source_index: int,
+) -> None:
     ensure_dir(output_path.parent)
 
     image = Image.open(image_path).convert("RGB")
@@ -38,17 +47,18 @@ def draw_preview(image_path: Path, labels, output_path: Path, accepted: bool, re
         y2 = int((y + h / 2) * h_img)
         draw.rectangle([x1, y1, x2, y2], outline="lime", width=3)
 
-    banner_h = 36
+    banner_h = 54
     canvas = Image.new("RGB", (image.width, image.height + banner_h), (245, 245, 245))
     canvas.paste(image, (0, banner_h))
 
     status = "ACCEPTED" if accepted else "REJECTED"
-    text = status if accepted else f"{status}: {', '.join(reasons[:3])}"
+    reason_text = "" if accepted else " | " + ", ".join(reasons[:2])
+    text = f"#{source_index:04d} — {status}{reason_text}"
 
     draw_canvas = ImageDraw.Draw(canvas)
     draw_canvas.text((8, 10), text, fill=(0, 0, 0))
 
-    canvas.thumbnail((420, 420))
+    canvas.thumbnail((460, 460))
     canvas.save(output_path, quality=95)
 
 
@@ -59,17 +69,18 @@ def make_contact_sheet(image_paths: list[Path], output_path: Path, cols: int = 5
     ensure_dir(output_path.parent)
 
     thumbs = []
+
     for path in image_paths:
         img = Image.open(path).convert("RGB")
-        img = img.resize((220, 220))
+        img = img.resize((240, 240))
         thumbs.append(img)
 
     rows = int(np.ceil(len(thumbs) / cols))
-    canvas = Image.new("RGB", (cols * 220, rows * 220), (20, 20, 20))
+    canvas = Image.new("RGB", (cols * 240, rows * 240), (20, 20, 20))
 
     for i, img in enumerate(thumbs):
-        x = (i % cols) * 220
-        y = (i // cols) * 220
+        x = (i % cols) * 240
+        y = (i // cols) * 240
         canvas.paste(img, (x, y))
 
     canvas.save(output_path, quality=95)
@@ -77,7 +88,7 @@ def make_contact_sheet(image_paths: list[Path], output_path: Path, cols: int = 5
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare clean source candidates for diffusion.")
-    parser.add_argument("--max-preview", type=int, default=80)
+    parser.add_argument("--max-preview", type=int, default=120)
     return parser.parse_args()
 
 
@@ -96,6 +107,16 @@ def main() -> None:
     tables_dir = ensure_dir(config["paths"]["tables"])
     previews_dir = ensure_dir(Path(config["paths"]["previews"]) / "diffusion_v2_sources")
 
+    blacklist_path = Path("configs/diffusion_source_blacklist.txt")
+    blacklisted_indices = set()
+
+    if blacklist_path.exists():
+        for line in blacklist_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            blacklisted_indices.add(int(line))
+
     rows = []
     accepted_preview_paths = []
     rejected_preview_paths = []
@@ -108,6 +129,7 @@ def main() -> None:
             continue
 
         image = cv2.imread(str(image_path))
+
         if image is None:
             continue
 
@@ -116,11 +138,13 @@ def main() -> None:
         mask_coverage = compute_mask_coverage(
             labels=labels,
             image_size=(w_img, h_img),
-            margin_px=source_cfg["max_box_max_side_px"] * 0,
+            margin_px=0,
         )
 
         rect_score = compute_internal_rectangle_score(image)
         seam_score = compute_vertical_seam_score(image)
+        ui_score = compute_ui_rectangle_score(image)
+        inset_score = compute_inset_window_score(image)
         box_stats = labels_box_stats(labels, image_size=(w_img, h_img))
 
         reasons = []
@@ -134,21 +158,35 @@ def main() -> None:
         if seam_score > float(source_cfg["max_vertical_seam_score"]):
             reasons.append("vertical_seam_score_high")
 
+        if ui_score > float(source_cfg["max_ui_rectangle_score"]):
+            reasons.append("ui_rectangle_score_high")
+
+        if inset_score > float(source_cfg["max_inset_window_score"]):
+            reasons.append("inset_window_score_high")
+
+        if source_index in blacklisted_indices:
+            reasons.append("manual_blacklist")
+
         if box_stats["max_box_side_px"] < float(source_cfg["min_box_max_side_px"]):
             reasons.append("box_too_tiny_for_diffusion_source")
 
         if box_stats["max_box_side_px"] > float(source_cfg["max_box_max_side_px"]):
             reasons.append("box_too_large_for_diffusion_source")
 
+        if box_stats["max_box_area_ratio"] > float(source_cfg["max_box_area_ratio"]):
+            reasons.append("box_area_ratio_too_large")
+
         accepted = len(reasons) == 0
 
         preview_path = previews_dir / ("accepted" if accepted else "rejected") / f"{source_index:04d}_{image_path.name}"
+
         draw_preview(
             image_path=image_path,
             labels=labels,
             output_path=preview_path,
             accepted=accepted,
             reasons=reasons,
+            source_index=source_index,
         )
 
         if accepted and len(accepted_preview_paths) < args.max_preview:
@@ -170,6 +208,9 @@ def main() -> None:
                 "mask_coverage": mask_coverage,
                 "internal_rectangle_score": rect_score,
                 "vertical_seam_score": seam_score,
+                "ui_rectangle_score": ui_score,
+                "inset_window_score": inset_score,
+                "manual_blacklisted": source_index in blacklisted_indices,
                 **box_stats,
             }
         )
@@ -188,6 +229,7 @@ def main() -> None:
         accepted_preview_paths,
         previews_dir / "accepted_contact_sheet.jpg",
     )
+
     make_contact_sheet(
         rejected_preview_paths,
         previews_dir / "rejected_contact_sheet.jpg",
